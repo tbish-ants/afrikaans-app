@@ -1,5 +1,5 @@
 // Offline support: cache the app shell. Deck + audio are stored by the app itself.
-const VERSION = 'v3';
+const VERSION = 'v4';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/store.js', 'js/github.js', 'js/check.js', 'js/sched.js', 'js/sync.js', 'js/stats.js', 'js/charts.js', 'js/obsidian.js',
@@ -24,7 +24,7 @@ self.addEventListener('fetch', e => {
   // network first (so updates arrive), fall back to cache when offline
   e.respondWith((async () => {
     try {
-      const res = await fetch(e.request);
+      const res = await fetch(e.request, { cache: 'no-cache' });  // always revalidate, so updates show up straight away
       if (res.ok) (await caches.open('shell-' + VERSION)).put(e.request, res.clone());
       return res;
     } catch {
