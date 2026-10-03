@@ -9,18 +9,27 @@ export async function config() {
   return { owner: s.owner || 'tbish-ants', repo: s.repo || 'afrikaans-vault', token: s.token || '' };
 }
 
-async function gh(path, accept = 'application/vnd.github+json') {
+/** Low-level GitHub API call against the vault repo. Returns the Response (throws on errors except allowed statuses). */
+export async function api(path, { method = 'GET', body = null, accept = 'application/vnd.github+json', allow = [] } = {}) {
   const { owner, repo, token } = await config();
   if (!token) throw new Error('No GitHub token set — add one in Settings.');
   const res = await fetch(`${API}/repos/${owner}/${repo}${path}`, {
-    headers: { Authorization: `Bearer ${token}`, Accept: accept, 'X-GitHub-Api-Version': '2022-11-28' },
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`, Accept: accept, 'X-GitHub-Api-Version': '2022-11-28',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : null,
     cache: 'no-store',
   });
+  if (allow.includes(res.status)) return res;
   if (res.status === 401) throw new Error('GitHub rejected the token (401). Check it in Settings.');
+  if (res.status === 403 && method !== 'GET') throw new Error('The token can\'t write to the vault yet — set Contents to "Read and write" on GitHub.');
   if (res.status === 404) throw new Error(`Not found on GitHub: ${path}. Has the deck been built yet?`);
   if (!res.ok) throw new Error(`GitHub error ${res.status}`);
   return res;
 }
+const gh = (path, accept) => api(path, { accept });
 
 /** Latest commit sha of the deck branch. */
 export async function deckSha() {

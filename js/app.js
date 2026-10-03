@@ -5,6 +5,9 @@ import {
   buildCards, loadStates, counts, buildQueue, Session, preview, fmtInterval,
   markKnown, dayStart, TYPE_LABEL, Rating, configure,
 } from './sched.js';
+import { syncProgress } from './sync.js';
+import { computeStats } from './stats.js';
+import { heatmapSvg, forecastSvg, stagesSvg, APP_PALETTE } from './charts.js';
 
 const $app = document.getElementById('app');
 const DEFAULTS = {
@@ -25,6 +28,7 @@ const ICON = {
   back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>',
   close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>',
   speaker: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg>',
+  chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   sync: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16M3 12a9 9 0 0 1 15.5-6.3L21 8"/><path d="M21 3v5h-5M3 21v-5h5"/></svg>',
 };
 
@@ -95,8 +99,33 @@ async function syncDeck({ force = false, quiet = false } = {}) {
   }
 }
 
+// ---------------------------------------------------------------- progress sync
+let syncing = null;
+async function saveProgress({ quiet = false } = {}) {
+  if (!S.settings.token || !navigator.onLine || !S.deck) return false;
+  if (syncing) return syncing;
+  syncing = (async () => {
+    try {
+      const r = await syncProgress({ deck: S.deck });
+      S.states = await loadStates();
+      if (r.restored) toast(`Restored your progress from the vault (${r.pulledCards} cards)`, 4000);
+      else if (!quiet && r.committed) toast('Progress saved to your vault');
+      return true;
+    } catch (e) {
+      if (!quiet || /Read and write/.test(e.message)) toast(e.message, 5000);
+      return false;
+    } finally { syncing = null; }
+  })();
+  return syncing;
+}
+async function progressDirty() {
+  const at = await kv.get('progressSyncedAt');
+  if (!at) return true;
+  return (await logStore.since(at)).length > 0;
+}
+
 // ---------------------------------------------------------------- router
-const routes = { home, study, practice, settings: settingsView, setup };
+const routes = { home, study, practice, settings: settingsView, setup, progress: progressView };
 function go(view, params = {}) {
   history.pushState({ view, params }, '', '#' + view);
   render(view, params);
@@ -144,6 +173,7 @@ async function home() {
   $app.innerHTML = `
     <div class="bar">
       <h1>Afrikaans</h1>
+      <button class="icon-btn" id="progress" aria-label="Progress">${ICON.chart}</button>
       <button class="icon-btn" id="sync" aria-label="Update deck">${ICON.sync}</button>
       <button class="icon-btn" id="settings" aria-label="Settings">${ICON.gear}</button>
     </div>
@@ -168,7 +198,8 @@ async function home() {
   document.getElementById('start').onclick = () => startSession({ mode: 'daily' });
   document.getElementById('practice').onclick = () => go('practice');
   document.getElementById('settings').onclick = () => go('settings');
-  document.getElementById('sync').onclick = async () => { await syncDeck({ force: false }); home(); };
+  document.getElementById('progress').onclick = () => go('progress');
+  document.getElementById('sync').onclick = async () => { await syncDeck({ force: false }); await saveProgress(); home(); };
   const l = document.getElementById('latest');
   if (l) l.onclick = () => startSession({ mode: 'cram', size: 25, filter: makeFilter({ lesson: latest.id }), title: `Lesson ${latest.date}` });
 }
@@ -436,16 +467,125 @@ function finished(early = false) {
   S.session = null;
   history.replaceState({ view: 'home', params: {} }, '', '#home');
   if (!sess || !sess.done) return render('home');
+  saveProgress({ quiet: true }).then(ok => {
+    const el = document.getElementById('saved'); if (el) el.textContent = ok ? 'Progress saved to your vault ✓' : 'Progress kept on this phone — will save to the vault when online.';
+  });
   $app.innerHTML = `
     <div class="bar"><h1>${early ? 'Session ended' : 'Klaar!'}</h1></div>
     <div class="panel done">
       <b>${sess.done}</b>
       <p>cards reviewed${early ? '' : ' — baie goed!'}</p>
+      <p class="small muted" id="saved">Saving progress…</p>
     </div>
     <div class="stack" style="margin-top:12px">
       <button class="btn primary block big" id="home">Back to home</button>
+      <button class="btn block" id="prog">See progress</button>
     </div>`;
   document.getElementById('home').onclick = () => render('home');
+  document.getElementById('prog').onclick = () => go('progress');
+}
+
+// ---------------------------------------------------------------- progress
+function wireTips(root) {
+  root.querySelectorAll('.chart').forEach(ch => {
+    const cap = ch.querySelector('.tip');
+    const show = el => { const t = el.closest('[data-tip]'); if (t && cap) cap.textContent = t.dataset.tip; };
+    ch.addEventListener('pointerover', e => show(e.target));
+    ch.addEventListener('click', e => show(e.target));
+  });
+}
+const pctOf = (a, b) => (b ? Math.round((a / b) * 100) : 0);
+function meter(started, mature, total) {
+  const s = pctOf(started - mature, total), m = pctOf(mature, total);
+  return `<div class="meter" role="img" aria-label="${m}% mature, ${pctOf(started, total)}% started">
+    ${m ? `<i class="m" style="width:${m}%"></i>` : ''}${s ? `<i class="s" style="width:${s}%"></i>` : ''}</div>`;
+}
+
+async function progressView() {
+  const logs = await logStore.all();
+  const st = computeStats({ deck: S.deck, cards: S.allCards, states: S.states, logs });
+  const P = APP_PALETTE;
+  const lessons = [...st.lessons].reverse().filter(l => l.total);
+  const grammar = [...st.grammar].sort((a, b) => b.mature / b.total - a.mature / a.total || b.started / b.total - a.started / a.total);
+  const at = await kv.get('progressSyncedAt');
+  $app.innerHTML = `
+    <div class="bar">
+      <button class="icon-btn" id="back" aria-label="Back">${ICON.back}</button>
+      <h1>Progress</h1>
+    </div>
+    <div class="stack">
+      <div class="hero panel">
+        <span class="muted small">Words learned</span>
+        <b>${st.words.learned.toLocaleString()}</b>
+        <span class="muted small">of ${st.words.total.toLocaleString()} · ${st.words.mastered.toLocaleString()} mastered</span>
+      </div>
+      <div class="stats">
+        <div class="stat"><b>${st.sentences.learned.toLocaleString()}</b><span>sentences learned</span></div>
+        <div class="stat"><b>${st.streak}</b><span>day streak</span></div>
+        <div class="stat"><b>${st.recall30 == null ? '—' : Math.round(st.recall30 * 100) + '%'}</b><span>recall, 30 days</span></div>
+      </div>
+
+      <div class="panel chart">
+        <h2>Activity</h2>
+        <p class="muted small">Reviews per day, last 20 weeks · ${st.reviews30.toLocaleString()} in the last 30 days · ${st.minutes7} min this week</p>
+        ${heatmapSvg(st.heat, P)}
+        <p class="tip small">Tap a day for details</p>
+      </div>
+
+      <div class="panel chart">
+        <h2>Cards by stage</h2>
+        <p class="muted small">Young = interval under 21 days · Mature = 21 days or more</p>
+        ${stagesSvg(st.stages, P)}
+        <p class="tip small"></p>
+      </div>
+
+      <div class="panel chart">
+        <h2>Coming up</h2>
+        <p class="muted small">Cards due each day for the next two weeks</p>
+        ${forecastSvg(st.forecast, P)}
+        <p class="tip small">Tap a day for details</p>
+      </div>
+
+      <div class="panel">
+        <div class="row"><h2>Trickiest</h2><span class="spacer"></span>
+          ${st.trickiest.length ? '<button class="btn" id="tricky">Practise these</button>' : ''}</div>
+        ${st.trickiest.length ? `<div class="list">${st.trickiest.slice(0, 12).map(t => {
+          const it = S.deck.items[t.item];
+          return `<div class="li"><div class="grow"><b lang="af">${esc(it.af)}</b><div class="muted small">${esc(it.en.join(' / '))}</div></div><span class="muted small" style="white-space:nowrap">${t.lapses ? `forgot ${t.lapses}×` : `missed ${t.again30}×`}</span></div>`;
+        }).join('')}</div>` : '<p class="muted small">Nothing tricky yet — words you keep forgetting will show up here.</p>'}
+      </div>
+
+      <div class="panel">
+        <h2>By lesson</h2>
+        <div class="legend small"><span><i class="sw m"></i>Mature</span><span><i class="sw s"></i>Started</span><span class="spacer"></span><span>% started</span></div>
+        <div class="list">${lessons.map(l => `
+          <button class="li lesson" data-lesson="${esc(l.id)}">
+            <div class="grow"><div class="row"><b>${esc(l.date)}</b><span class="muted small ellipsis">${esc(l.topics.slice(0, 3).join(', '))}</span></div>
+            ${meter(l.started, l.mature, l.total)}</div>
+            <span class="muted small num" title="started">${pctOf(l.started, l.total)}%</span>
+          </button>`).join('')}</div>
+        <p class="muted small">Tap a lesson to practise it.</p>
+      </div>
+
+      <div class="panel">
+        <h2>Grammar</h2>
+        <div class="list">${grammar.map(g => `
+          <div class="li"><div class="grow"><div class="row"><b>${esc(g.id)}</b><span class="spacer"></span><span class="muted small">${g.total} cards</span></div>
+          ${meter(g.started, g.mature, g.total)}</div><span class="muted small num" title="started">${pctOf(g.started, g.total)}%</span></div>`).join('')}</div>
+      </div>
+      <p class="muted small center">${at ? `Saved to vault ${esc(new Date(at).toLocaleString())} · also in Obsidian under <b>Progress</b>` : 'Not yet saved to the vault'}</p>
+    </div>`;
+  wireTips($app);
+  document.getElementById('back').onclick = () => history.back();
+  $app.querySelectorAll('[data-lesson]').forEach(b => b.onclick = () => {
+    const id = b.dataset.lesson;
+    startSession({ mode: 'cram', size: 25, filter: makeFilter({ lesson: id }), title: `Lesson ${id}` });
+  });
+  const tb = document.getElementById('tricky');
+  if (tb) tb.onclick = () => {
+    const set = new Set(st.trickiest.map(t => t.item));
+    startSession({ mode: 'cram', size: 25, filter: (c, it) => set.has(c.item) && !!S.states.get(c.id), title: 'Trickiest' });
+  };
 }
 
 // ---------------------------------------------------------------- settings
@@ -495,8 +635,10 @@ async function settingsView() {
         <button type="button" class="btn block" id="dl-audio">Download all audio</button>
       </div>
       <div class="panel stack">
-        <h2>Backup</h2>
-        <p class="small muted">Your progress lives on this phone. Export a backup now and then (syncing to the vault comes next).</p>
+        <h2>Progress backup</h2>
+        <p class="small muted" id="sync-stat">Progress is saved to your vault (<code>_app/progress</code>) after each session, and the Obsidian dashboards in <code>Progress/</code> are updated.</p>
+        <button type="button" class="btn block" id="save-now">Save progress now</button>
+        <p class="small muted">Or keep a file copy:</p>
         <div class="row"><button type="button" class="btn" id="export" style="flex:1">Export</button>
         <label class="btn" style="flex:1">Import<input type="file" id="import" accept="application/json" hidden></label></div>
       </div>
@@ -518,7 +660,7 @@ async function settingsView() {
   document.getElementById('connect').onclick = async () => {
     await saveSettings(readForm());
     const ok = await syncDeck({ force: true });
-    if (ok) go('home');
+    if (ok) { await saveProgress({ quiet: true }); go('home'); }
   };
   document.getElementById('dl-audio').onclick = async e => {
     const btn = e.currentTarget; btn.disabled = true;
@@ -529,6 +671,15 @@ async function settingsView() {
       stat.textContent = `Done. ${await gh.audioCount()} clips saved${r.failed ? ` (${r.failed} failed — try again)` : ''}.`;
     } catch (err) { stat.textContent = err.message; }
     btn.disabled = false;
+  };
+  kv.get('progressSyncedAt').then(at => {
+    if (at) document.getElementById('sync-stat').insertAdjacentHTML('beforeend', ` Last saved ${esc(new Date(at).toLocaleString())}.`);
+  });
+  document.getElementById('save-now').onclick = async e => {
+    e.currentTarget.disabled = true;
+    const ok = await saveProgress();
+    e.currentTarget.disabled = false;
+    if (ok) settingsView();
   };
   document.getElementById('export').onclick = async () => {
     const data = { app: 'afrikaans', version: 1, exported: new Date().toISOString(),
@@ -567,6 +718,7 @@ document.addEventListener('keydown', e => {
   render(S.deck ? 'home' : 'setup');
   if (S.deck && S.settings.token) {
     const ok = await syncDeck({ quiet: true });
+    if (ok && (S.states.size === 0 || (await progressDirty()))) await saveProgress({ quiet: true });
     if (ok && !S.session && location.hash === '#home') home();
   }
 })();

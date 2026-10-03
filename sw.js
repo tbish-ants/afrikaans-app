@@ -1,8 +1,8 @@
 // Offline support: cache the app shell. Deck + audio are stored by the app itself.
-const VERSION = 'v2';
+const VERSION = 'v3';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
-  'js/app.js', 'js/store.js', 'js/github.js', 'js/check.js', 'js/sched.js',
+  'js/app.js', 'js/store.js', 'js/github.js', 'js/check.js', 'js/sched.js', 'js/sync.js', 'js/stats.js', 'js/charts.js', 'js/obsidian.js',
   'vendor/ts-fsrs.mjs', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 
