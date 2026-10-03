@@ -181,3 +181,9 @@ details.panel summary { cursor: pointer; font-weight: 600; }
 .center { text-align: center; }
 .done { text-align: center; padding: 40px 0; }
 .done b { font-size: 2.4rem; display: block; }
+
+/* typing: answer box sits right under the question, so the keyboard never covers it */
+.study.typing .card-face { padding: 16px 12px; }
+.study.typing .prompt { font-size: 1.4rem; }
+.study.typing .prompt.sentence { font-size: 1.15rem; }
+.footer-actions.typing { margin-top: 0; position: static; background: none; padding-top: 0; }

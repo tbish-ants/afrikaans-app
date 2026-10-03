@@ -324,14 +324,14 @@ async function study() {
       <div class="progress"><i style="width:${pct}%"></i></div>
       <span class="muted small">${sess.remaining() + 1}</span>
     </div>
-    <div class="study">
+    <div class="study ${typing ? 'typing' : ''}">
       <div class="panel card-face">
         <div class="kind">${esc(kind)}${isNew ? ' · <span style="color:var(--accent)">new</span>' : ''}</div>
         ${promptHtml}
         ${sub ? `<div class="sub small">${sub}</div>` : ''}
         <div id="answer"></div>
       </div>
-      <div class="footer-actions" id="actions">
+      <div class="footer-actions ${typing ? 'typing' : ''}" id="actions">
         ${typing
           ? `<form id="af" class="stack"><input class="answer-input" id="typed" autocomplete="off" autocapitalize="off" spellcheck="false"
                lang="${card.type === 'ar' ? 'en' : 'af'}" placeholder="${card.type === 'ar' ? 'Type the English…' : 'Tik in Afrikaans…'}">
@@ -359,6 +359,12 @@ async function study() {
 
   if (typing) {
     const inp = document.getElementById('typed');
+    // keep the question visible when the keyboard opens
+    inp.addEventListener('focus', () => setTimeout(() => window.scrollTo({ top: 0 }), 300));
+    if (window.visualViewport) {
+      const onVV = () => { if (document.activeElement === inp) window.scrollTo({ top: 0 }); };
+      window.visualViewport.addEventListener('resize', onVV, { once: true });
+    }
     setTimeout(() => inp.focus(), 50);
     document.getElementById('af').onsubmit = e => { e.preventDefault(); reveal(inp.value); };
     document.getElementById('skip').onclick = () => reveal('');
@@ -411,6 +417,8 @@ function showAnswer(card, it, st, result, typedText, ms) {
   const pv = preview(st);
   const sugg = result ? result.suggested : 0;
   const names = { 1: 'Again', 2: 'Hard', 3: 'Good', 4: 'Easy' };
+  document.getElementById('actions').classList.remove('typing');
+  document.querySelector('.study')?.classList.remove('typing');
   document.getElementById('actions').innerHTML = `
     <div class="ratings">
       ${[1, 2, 3, 4].map(r => `<button class="rate r${r} ${sugg === r ? 'suggested' : ''}" data-r="${r}">${names[r]}<small>${fmtInterval(pv[r])}</small></button>`).join('')}
