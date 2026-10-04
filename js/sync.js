@@ -10,8 +10,8 @@ const sec = d => (d ? Math.round(new Date(d).getTime() / 1000) : 0);
 const fromSec = s => (s ? new Date(s * 1000) : undefined);
 const r4 = x => Math.round((x || 0) * 1e4) / 1e4;
 const VERDICT = ['exact', 'accent', 'close', 'wrong'];
-const MODE = { daily: 'd', cram: 'c' };
-const MODE_R = { d: 'daily', c: 'cram' };
+const MODE = { daily: 'd', cram: 'c', new: 'n' };
+const MODE_R = { d: 'daily', c: 'cram', n: 'new' };
 
 // ---------------------------------------------------------------- (de)serialise
 function cardToRow(st) {

@@ -137,6 +137,11 @@ export function buildQueue({ allCards, states, deck, settings, now = new Date(),
     return out;
   };
 
+  if (mode === 'new') {
+    // only cards never studied: meaning cards for unseen notes, plus say-it/gap cards once unlocked.
+    // Ignores the daily new-card limit (you chose to do this), still one card per note.
+    return take(shuffle(fresh.slice()).sort((a, b) => ({ ar: 0, ra: 1, cz: 2 }[a.type] - { ar: 0, ra: 1, cz: 2 }[b.type])), size || 25);
+  }
   if (mode === 'cram') {
     const max = size || 20;
     const a = take(shuffle(due), max);

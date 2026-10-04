@@ -451,7 +451,8 @@ async function practice() {
       <div class="panel">
         <div class="seg" role="radiogroup">
           <label><input type="radio" name="mode" value="cram" checked><span>Practise now</span></label>
-          <label><input type="radio" name="mode" value="daily"><span>Only due + new</span></label>
+          <label><input type="radio" name="mode" value="daily"><span>Due + new</span></label>
+          <label><input type="radio" name="mode" value="new"><span>Only new</span></label>
         </div>
         <label class="field" style="margin-top:12px"><span>How many cards</span>
           <input type="number" name="size" min="5" max="200" value="${saved.size || 25}"></label>
@@ -482,7 +483,8 @@ async function practice() {
     const filt = makeFilter(f);
     const c = counts({ allCards: S.allCards, states: S.states, deck: S.deck, settings: S.settings, filter: filt });
     const total = S.allCards.filter(x => filt(x, S.deck.items[x.item])).length;
-    document.getElementById('count').textContent = `${total} cards match · ${c.due} due · ${total - c.learned} never studied`;
+    document.getElementById('count').textContent = `${total} cards match · ${c.due} due · ${total - c.learned} never studied`
+      + (f.mode === 'new' ? ` · ${c.newAvail} ready to learn now` : '');
   };
   form.onchange = upd; upd();
   form.onsubmit = async e => {
@@ -508,7 +510,7 @@ async function practice() {
 // ---------------------------------------------------------------- study session
 function startSession({ mode, size = 0, filter = null, title = 'Review' }) {
   const queue = buildQueue({ allCards: S.allCards, states: S.states, deck: S.deck, settings: S.settings, filter, mode, size });
-  if (!queue.length) { toast('Nothing to study with those settings'); return; }
+  if (!queue.length) { toast(mode === 'new' ? 'No new cards left in this selection' : 'Nothing to study with those settings'); return; }
   S.session = new Session(queue, S.states, mode);
   S.session.title = title;
   // fetch audio for this session in the background
