@@ -46,15 +46,57 @@ function inline(s) {
   return t.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<i>$2</i>')
           .replace(/`([^`]+)`/g, '<code>$1</code>');
 }
+function splitCells(row) {
+  let r = row.trim();
+  if (r.startsWith('|')) r = r.slice(1);
+  if (r.endsWith('|') && !r.endsWith('\\|')) r = r.slice(0, -1);
+  const cells = []; let cur = '', depth = 0;
+  for (let i = 0; i < r.length; i++) {
+    const c = r[i];
+    if (c === '\\' && r[i + 1] === '|') { cur += '|'; i++; continue; }
+    if (c === '[' && r[i + 1] === '[') { depth++; cur += '[['; i++; continue; }
+    if (c === ']' && r[i + 1] === ']') { depth = Math.max(0, depth - 1); cur += ']]'; i++; continue; }
+    if (c === '|' && !depth) { cells.push(cur.trim()); cur = ''; continue; }
+    cur += c;
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+const isSep = line => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line);
+function tableHtml(lines) {
+  const hasHead = lines.length > 1 && isSep(lines[1]);
+  const head = hasHead ? splitCells(lines[0]) : null;
+  const align = hasHead ? splitCells(lines[1]).map(c => (c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : '')) : [];
+  const rows = (hasHead ? lines.slice(2) : lines).map(splitCells);
+  const cell = (tag, c, i) => `<${tag}${align[i] ? ` style="text-align:${align[i]}"` : ''}>${inline(c)}</${tag}>`;
+  return `<div class="tbl"><table>${head ? `<thead><tr>${head.map((c, i) => cell('th', c, i)).join('')}</tr></thead>` : ''}<tbody>${
+    rows.map(r => `<tr>${r.map((c, i) => cell('td', c, i)).join('')}</tr>`).join('')}</tbody></table></div>`;
+}
 function md(text) {
   const out = []; let list = null;
   const close = () => { if (list) { out.push(`</${list}>`); list = null; } };
-  for (const raw of String(text || '').split('\n')) {
-    const line = raw.trimEnd();
+  const lines = String(text || '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trimEnd();
     let m;
+    if (/^\s*\|/.test(line)) {                       // table: gather consecutive | lines
+      close(); const tl = [];
+      while (i < lines.length && /^\s*\|/.test(lines[i])) tl.push(lines[i++].trimEnd());
+      i--; out.push(tableHtml(tl)); continue;
+    }
+    if ((m = line.match(/^\s*>\s?(.*)$/))) {          // blockquote / Obsidian callout
+      close(); const ql = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) ql.push(lines[i++].replace(/^\s*>\s?/, ''));
+      i--;
+      const cm = ql[0] && ql[0].match(/^\[!(\w+)\][+-]?\s*(.*)$/);
+      if (cm) ql[0] = cm[2] ? `**${cm[2]}**` : '';
+      out.push(`<blockquote${cm ? ` class="callout callout-${esc(cm[1].toLowerCase())}"` : ''}>${md(ql.join('\n'))}</blockquote>`);
+      continue;
+    }
     if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) { if (list !== 'ul') { close(); out.push('<ul>'); list = 'ul'; } out.push(`<li>${inline(m[1])}</li>`); }
     else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) { if (list !== 'ol') { close(); out.push('<ol>'); list = 'ol'; } out.push(`<li>${inline(m[1])}</li>`); }
     else if ((m = line.match(/^#{1,6}\s+(.*)$/))) { close(); out.push(`<h4>${inline(m[1])}</h4>`); }
+    else if (/^\s*(---|\*\*\*)\s*$/.test(line)) { close(); out.push('<hr>'); }
     else if (!line.trim()) close();
     else { close(); out.push(`<p>${inline(line)}</p>`); }
   }
@@ -66,6 +108,8 @@ const ICON = {
   back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>',
   close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>',
   speaker: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg>',
+  book: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14z"/><path d="M6.5 17A2.5 2.5 0 0 0 4 19.5 2.5 2.5 0 0 0 6.5 22H20v-5"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>',
   chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   sync: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16M3 12a9 9 0 0 1 15.5-6.3L21 8"/><path d="M21 3v5h-5M3 21v-5h5"/></svg>',
 };
@@ -219,6 +263,7 @@ function sheetBody(ref) {
         ${forms ? `<div class="kvs">${forms}</div>` : ''}
         ${it.construction ? `<p class="small"><b>Pattern:</b> ${esc(it.construction)}</p>` : ''}
         ${it.note ? `<div class="md">${md(it.note)}</div>` : ''}
+        ${(it.extra || []).map(([t, b]) => `${t ? `<h3>${esc(t)}</h3>` : ''}<div class="md">${md(b)}</div>`).join('')}
         ${it.synonyms?.length ? `<h3>Synonyms</h3><div class="facts left">${refChips(it.synonyms)}</div>` : ''}
         ${it.antonyms?.length ? `<h3>Opposites</h3><div class="facts left">${refChips(it.antonyms)}</div>` : ''}
         ${it.confusable?.length ? `<h3>Don't confuse with</h3><div class="facts left">${refChips(it.confusable)}</div>` : ''}
@@ -233,6 +278,7 @@ function sheetBody(ref) {
       ${it.grammar?.length ? `<h3>Grammar</h3><div class="facts left">${it.grammar.map(g => chipLink('g:' + g, esc(g))).join('')}</div>` : ''}
       ${it.words?.length ? `<h3>Words</h3>${wordListHtml(it)}` : ''}
       ${it.note ? `<div class="md">${md(it.note)}</div>` : ''}
+      ${(it.extra || []).map(([t, b]) => `${t ? `<h3>${esc(t)}</h3>` : ''}<div class="md">${md(b)}</div>`).join('')}
       ${it.lessons?.length ? `<h3>Lesson</h3><div class="facts left">${it.lessons.map(l => chipLink('l:' + l, esc(l))).join('')}</div>` : ''}`;
   }
   if (kind === 'g') {
@@ -244,7 +290,8 @@ function sheetBody(ref) {
       <div class="sheet-title"><h2>${esc(g.id)}</h2></div>
       <div class="facts left">${g.level ? `<span class="chip">${esc(g.level)}</span>` : ''}${g.status !== 'reviewed' ? '<span class="chip chip-draft">Draft</span>' : '<span class="chip">Reviewed</span>'}${(g.aliases || []).map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div>
       ${g.pattern ? `<p class="pattern" lang="af">${esc(g.pattern)}</p>` : ''}
-      ${sec('Rule', g.rule)}${sec('Patterns', g.patterns)}${sec('Exceptions', g.exceptions)}${sec('Common mistakes', g.mistakes)}
+      ${g.sections?.length ? g.sections.map(([t, b]) => t ? sec(esc(t), b) : `<div class="md">${md(b)}</div>`).join('')
+        : sec('Rule', g.rule) + sec('Patterns', g.patterns) + sec('Exceptions', g.exceptions) + sec('Common mistakes', g.mistakes)}
       ${g.related?.length ? `<h3>Related</h3><div class="facts left">${g.related.map(r => chipLink('g:' + r, esc(r))).join('')}</div>` : ''}
       <h3>Examples (${ex.length})</h3>${phraseRows(ex)}
       ${ex.length ? practise('Practise this topic', { grammar: key }) : ''}`;
@@ -318,7 +365,7 @@ $sheet.querySelector('#sheet-back').onclick = () => history.back();
 })();
 
 // ---------------------------------------------------------------- router
-const routes = { home, study, practice, settings: settingsView, setup, progress: progressView };
+const routes = { home, study, practice, settings: settingsView, setup, progress: progressView, browse: browseView };
 function go(view, params = {}) {
   history.pushState({ view, params }, '', '#' + view);
   render(view, params);
@@ -379,6 +426,7 @@ async function home() {
   $app.innerHTML = `
     <div class="bar">
       <h1>Afrikaans</h1>
+      <button class="icon-btn" id="browse" aria-label="Browse notes">${ICON.book}</button>
       <button class="icon-btn" id="progress" aria-label="Progress">${ICON.chart}</button>
       <button class="icon-btn" id="sync" aria-label="Update deck">${ICON.sync}</button>
       <button class="icon-btn" id="settings" aria-label="Settings">${ICON.gear}</button>
@@ -393,6 +441,7 @@ async function home() {
         ${c.due + c.newToday ? 'Start review' : 'All done for today 🎉'}
       </button>
       <button class="btn block" id="practice">Practise a lesson or topic…</button>
+      <button class="btn block" id="browse2">${ICON.search} Browse words, sentences &amp; grammar</button>
       ${latest ? `<button class="btn block ghost" id="latest">Drill latest lesson (${esc(latest.date)})</button>` : ''}
       <div class="panel">
         <div class="row"><h2>Last 14 days</h2><span class="spacer"></span><span class="muted small">${streak ? `${streak}-day streak` : ''}</span></div>
@@ -411,6 +460,8 @@ async function home() {
   document.getElementById('practice').onclick = () => go('practice');
   document.getElementById('settings').onclick = () => go('settings');
   document.getElementById('progress').onclick = () => go('progress');
+  document.getElementById('browse').onclick = () => go('browse');
+  document.getElementById('browse2').onclick = () => go('browse');
   document.getElementById('sync').onclick = async () => { await syncDeck({ force: false }); await saveProgress(); home(); };
   const l = document.getElementById('latest');
   if (l) l.onclick = () => startSession({ mode: 'cram', size: 25, filter: makeFilter({ lesson: latest.id }), title: `Lesson ${latest.date}` });
@@ -831,6 +882,145 @@ async function progressView() {
     const set = new Set(st.trickiest.map(t => t.item));
     startSession({ mode: 'cram', size: 25, filter: (c, it) => set.has(c.item) && !!S.states.get(c.id), title: 'Trickiest' });
   };
+}
+
+// ---------------------------------------------------------------- browse (the vault, in the app)
+const fold = t => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[‘’]/g, "'");
+function noteStatus(iid) {
+  const ss = ['ar', 'ra', 'cz'].map(t => S.states.get(`${iid}|${t}`)).filter(Boolean);
+  if (!ss.length) return { key: 0, label: 'not started' };
+  const sd = ss.map(x => (x.fsrs.state === 2 ? x.fsrs.scheduled_days || 0 : -1));
+  const lapses = ss.reduce((a, x) => a + (x.fsrs.lapses || 0), 0);
+  if (sd.every(d => d >= 21) && ss.length >= (S.deck.items[iid].t === 'p' ? 2 : 2)) return { key: 3, label: 'mastered', lapses };
+  if (sd.some(d => d >= 0)) return { key: 2, label: 'learned', lapses };
+  return { key: 1, label: 'learning', lapses };
+}
+let browseIdx = null;
+function browseIndex() {
+  if (browseIdx && browseIdx.deck === S.deck) return browseIdx;
+  const rows = [];
+  for (const [iid, it] of Object.entries(S.deck.items)) {
+    const hay = fold([it.af, it.name, ...(it.en || []), ...(it.aliases || []), ...Object.values(it.forms || {}), ...(it.topics || [])].join(' | '));
+    rows.push({ ref: iid, t: it.t, it, hay, sortKey: fold(it.af).replace(/^[^\p{L}\p{N}']+/u, '').replace(/^'n /, 'n ') });
+  }
+  for (const g of S.deck.grammar) {
+    rows.push({ ref: 'g:' + g.id, t: 'g', g, hay: fold([g.id, ...(g.aliases || []), g.pattern, g.rule].join(' | ')), sortKey: fold(g.id) });
+  }
+  for (const l of S.deck.lessons) {
+    rows.push({ ref: 'l:' + l.id, t: 'l', l, hay: fold([l.id, ...(l.topics || []), l.summary].join(' | ')), sortKey: l.id });
+  }
+  browseIdx = { deck: S.deck, rows };
+  return browseIdx;
+}
+
+async function browseView() {
+  const st = { tab: 'all', q: '', topic: '', lesson: '', level: '', type: '', sort: 'az', ...((await kv.get('browse')) || {}) };
+  const items = Object.values(S.deck.items);
+  const topics = [...new Set(items.flatMap(i => i.topics || []))].sort();
+  const posList = [...new Set(items.filter(i => i.t === 'v').map(i => i.pos).filter(Boolean))].sort();
+  const kindList = [...new Set(items.filter(i => i.t === 'p').map(i => i.kind).filter(Boolean))].sort();
+  const lessons = [...S.deck.lessons].reverse();
+  $app.innerHTML = `
+    <div class="bar">
+      <button class="icon-btn" id="back" aria-label="Back">${ICON.back}</button>
+      <h1>Browse</h1>
+    </div>
+    <div class="browse-head">
+      <label class="searchbox">${ICON.search}<input type="search" id="q" placeholder="Search Afrikaans or English…" value="${esc(st.q)}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <div class="seg tabs" role="tablist">
+        ${[['all', 'All'], ['v', 'Words'], ['p', 'Sentences'], ['g', 'Grammar'], ['l', 'Lessons']].map(([v, l]) =>
+          `<label><input type="radio" name="tab" value="${v}" ${st.tab === v ? 'checked' : ''}><span>${l}</span></label>`).join('')}
+      </div>
+      <details class="filters" ${st.topic || st.lesson || st.level || st.type ? 'open' : ''}>
+        <summary>Filter &amp; sort</summary>
+        <div class="filter-grid">
+          <label class="field"><span>Topic</span><select id="f-topic"><option value="">Any</option>${topics.map(t => `<option ${st.topic === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
+          <label class="field"><span>Lesson</span><select id="f-lesson"><option value="">Any</option>${lessons.map(l => `<option value="${esc(l.id)}" ${st.lesson === l.id ? 'selected' : ''}>${esc(l.date)}</option>`).join('')}</select></label>
+          <label class="field"><span>Level</span><select id="f-level"><option value="">Any</option>${['A1', 'A2', 'B1', 'B2'].map(l => `<option ${st.level === l ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+          <label class="field"><span>Type</span><select id="f-type"><option value="">Any</option>
+            <optgroup label="Words">${posList.map(x => `<option value="pos:${esc(x)}" ${st.type === 'pos:' + x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</optgroup>
+            <optgroup label="Sentences">${kindList.map(x => `<option value="kind:${esc(x)}" ${st.type === 'kind:' + x ? 'selected' : ''}>${esc(x)}</option>`).join('')}</optgroup></select></label>
+          <label class="field"><span>Sort by</span><select id="f-sort">
+            ${[['az', 'A–Z'], ['newest', 'Newest lesson first'], ['oldest', 'Oldest lesson first'], ['work', 'Needs work'], ['status', 'Not started first']].map(([v, l]) => `<option value="${v}" ${st.sort === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+          <button class="btn ghost" id="f-clear" type="button">Clear filters</button>
+        </div>
+      </details>
+      <p class="muted small" id="count"></p>
+    </div>
+    <div class="list browse-list" id="results"></div>
+    <button class="btn block ghost" id="more" hidden>Show more</button>`;
+
+  const $q = document.getElementById('q'), $res = document.getElementById('results'), $more = document.getElementById('more');
+  let shown = 60, matches = [];
+  const read = () => ({
+    tab: $app.querySelector('input[name=tab]:checked').value, q: $q.value,
+    topic: document.getElementById('f-topic').value, lesson: document.getElementById('f-lesson').value,
+    level: document.getElementById('f-level').value, type: document.getElementById('f-type').value,
+    sort: document.getElementById('f-sort').value,
+  });
+  const rowHtml = r => {
+    if (r.t === 'g') return `<button class="li" data-sheet="${esc(r.ref)}"><div class="grow"><b>${esc(r.g.id)}</b>
+      <div class="muted small ellipsis">${esc(r.g.pattern || (r.g.aliases || []).join(', '))}</div></div>
+      <span class="tag">${r.g.status === 'reviewed' ? 'grammar' : 'grammar · draft'}</span></button>`;
+    if (r.t === 'l') return `<button class="li" data-sheet="${esc(r.ref)}"><div class="grow"><b>Lesson ${esc(r.l.date)}</b>
+      <div class="muted small ellipsis">${esc((r.l.topics || []).join(', '))}</div></div><span class="tag">lesson</span></button>`;
+    const it = r.it, ns = noteStatus(r.ref);
+    const meta = it.t === 'v' ? [it.pos, it.level].filter(Boolean).join(' · ') : [it.kind, it.level].filter(Boolean).join(' · ');
+    return `<button class="li" data-sheet="${esc(r.ref)}"><div class="grow">
+      <div><b lang="af">${esc(it.af)}</b> <span class="muted small">${esc(meta)}</span></div>
+      <div class="muted small ellipsis">${esc((it.en || []).join(' / '))}</div></div>
+      <span class="tag st-${ns.key}">${ns.label}</span></button>`;
+  };
+  const update = (resetShown = true) => {
+    const f = read();
+    kv.set('browse', f).catch(() => {});
+    if (resetShown) shown = 60;
+    const terms = fold(f.q).split(/\s+/).filter(Boolean);
+    const [tk, tv] = f.type ? f.type.split(':') : [];
+    const noteFilters = f.topic || f.lesson || f.level || f.type;
+    matches = browseIndex().rows.filter(r => {
+      if (f.tab !== 'all' && r.t !== f.tab) return false;
+      if (terms.length && !terms.every(t => r.hay.includes(t))) return false;
+      if (r.t === 'g') return !noteFilters || (!!f.lesson && false) || (!f.topic && !f.lesson && !f.type && (!f.level || r.g.level === f.level));
+      if (r.t === 'l') return !noteFilters || (!f.topic || (r.l.topics || []).includes(f.topic)) && (!f.lesson || r.l.id === f.lesson) && !f.level && !f.type;
+      const it = r.it;
+      if (f.topic && !(it.topics || []).includes(f.topic)) return false;
+      if (f.lesson && !(it.lessons || []).includes(f.lesson)) return false;
+      if (f.level && it.level !== f.level) return false;
+      if (tk === 'pos' && (it.t !== 'v' || it.pos !== tv)) return false;
+      if (tk === 'kind' && (it.t !== 'p' || it.kind !== tv)) return false;
+      return true;
+    });
+    const first = r => (r.it ? r.it.first || '' : r.l ? r.l.id : '');
+    const cmp = {
+      az: (a, b) => a.sortKey.localeCompare(b.sortKey),
+      newest: (a, b) => first(b).localeCompare(first(a)) || a.sortKey.localeCompare(b.sortKey),
+      oldest: (a, b) => first(a).localeCompare(first(b)) || a.sortKey.localeCompare(b.sortKey),
+      work: (a, b) => ((b.it ? noteStatus(b.ref).lapses || 0 : -1) - (a.it ? noteStatus(a.ref).lapses || 0 : -1)) || a.sortKey.localeCompare(b.sortKey),
+      status: (a, b) => ((a.it ? noteStatus(a.ref).key : 9) - (b.it ? noteStatus(b.ref).key : 9)) || a.sortKey.localeCompare(b.sortKey),
+    }[f.sort] || ((a, b) => a.sortKey.localeCompare(b.sortKey));
+    const rank = r => (r.t === 'g' ? 1 : r.t === 'l' ? 2 : 0);   // in "All": words & sentences, then grammar, then lessons
+    const cmpAll = (a, b) => rank(a) - rank(b) || cmp(a, b);
+    // exact matches first when searching
+    if (terms.length) {
+      const q = fold(f.q).trim();
+      matches.sort((a, b) => (fold(b.it?.af || b.g?.id || '') === q) - (fold(a.it?.af || a.g?.id || '') === q) || cmpAll(a, b));
+    } else matches.sort(cmpAll);
+    document.getElementById('count').textContent = `${matches.length.toLocaleString()} result${matches.length === 1 ? '' : 's'}`;
+    $res.innerHTML = matches.length ? matches.slice(0, shown).map(rowHtml).join('') : '<p class="muted">Nothing matches — try fewer filters or a shorter search.</p>';
+    $more.hidden = matches.length <= shown;
+    $more.textContent = `Show more (${(matches.length - shown).toLocaleString()} left)`;
+  };
+  let t;
+  $q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(update, 120); });
+  $app.querySelectorAll('input[name=tab], .filters select').forEach(el => el.addEventListener('change', () => update()));
+  document.getElementById('f-clear').onclick = () => {
+    ['f-topic', 'f-lesson', 'f-level', 'f-type'].forEach(id => { document.getElementById(id).value = ''; });
+    update();
+  };
+  $more.onclick = () => { shown += 60; update(false); };
+  document.getElementById('back').onclick = () => history.back();
+  update();
 }
 
 // ---------------------------------------------------------------- settings
