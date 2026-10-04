@@ -305,9 +305,37 @@ function sheetBody(ref) {
       ${l.summary ? `<h3>Summary</h3><div class="md">${md(l.summary)}</div>` : ''}
       ${l.points ? `<h3>Grammar points</h3><div class="md">${md(l.points)}</div>` : ''}
       ${l.grammar?.length ? `<h3>Grammar topics</h3><div class="facts left">${l.grammar.map(g => chipLink('g:' + g, esc(g))).join('')}</div>` : ''}
-      ${practise('Practise this lesson', { lesson: key })}`;
+      ${practise('Practise this lesson', { lesson: key })}
+      ${lessonLists(key)}`;
   }
   return '';
+}
+
+// words & sentences belonging to a lesson (what the Obsidian lesson bases show)
+const sheetExpanded = new Set();
+function lessonLists(lessonId) {
+  const words = [], sents = [];
+  for (const [iid, it] of Object.entries(S.deck.items)) {
+    if (!(it.lessons || []).includes(lessonId)) continue;
+    (it.t === 'v' ? words : sents).push([iid, it]);
+  }
+  const byAf = (a, b) => a[1].af.localeCompare(b[1].af, 'af');
+  words.sort(byAf); sents.sort(byAf);
+  const block = (kind, title, list) => {
+    if (!list.length) return '';
+    const key = `${lessonId}|${kind}`, all = sheetExpanded.has(key), max = 15;
+    const rows = (all ? list : list.slice(0, max)).map(([iid, it]) => {
+      const ns = noteStatus(iid);
+      return `<button class="li" data-sheet="${esc(iid)}"><div class="grow"><b lang="af">${esc(it.af)}</b>
+        <div class="muted small">${esc(it.en.join(' / '))}</div></div><span class="tag st-${ns.key}">${ns.label}</span></button>`;
+    }).join('');
+    return `<h3>${title} (${list.length})</h3><div class="list">${rows}</div>
+      ${list.length > max && !all ? `<button class="btn ghost block" data-expand="${esc(key)}">Show all ${list.length}</button>` : ''}`;
+  };
+  const newWords = words.filter(([iid]) => noteStatus(iid).key === 0).length;
+  return `${block('v', 'Words', words)}
+    ${newWords && !S.session ? `<button class="btn block" data-practise='${esc(JSON.stringify({ lesson: lessonId, kind: 'v', mode: 'new' }))}'>Learn the ${newWords} new word${newWords === 1 ? '' : 's'}</button>` : ''}
+    ${block('p', 'Sentences', sents)}`;
 }
 
 const sheetStack = [];
@@ -335,7 +363,10 @@ function drawSheet() {
   wireAudio(body);
   body.querySelectorAll('[data-practise]').forEach(b => b.onclick = () => {
     const f = JSON.parse(b.dataset.practise);
-    closeSheets(() => startSession({ mode: 'cram', size: 25, filter: makeFilter(f), title: f.lesson ? `Lesson ${f.lesson}` : f.grammar }));
+    closeSheets(() => startSession({ mode: f.mode || 'cram', size: 25, filter: makeFilter(f), title: f.lesson ? `Lesson ${f.lesson}` : f.grammar }));
+  });
+  body.querySelectorAll('[data-expand]').forEach(b => b.onclick = () => {
+    const top = body.scrollTop; sheetExpanded.add(b.dataset.expand); drawSheet(); body.scrollTop = top;
   });
 }
 function openSheet(ref) {
