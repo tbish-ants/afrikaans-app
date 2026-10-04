@@ -94,6 +94,17 @@ export function computeStats({ deck, cards, states, logs, now = new Date(), heat
     if (it.t === 'p') (it.grammar || []).forEach(g => add(grammarIdx.get(g)));
   }
 
+  // ---- topics (as tagged on words; sentences inherit their lesson's topics)
+  const topicIdx = new Map();
+  for (const c of cards) {
+    const it = items[c.item]; const s = stage(states.get(c.id));
+    for (const t of it.topics || []) {
+      if (!topicIdx.has(t)) topicIdx.set(t, { id: t, total: 0, started: 0, mature: 0 });
+      const r = topicIdx.get(t); r.total++; if (s !== 'new') r.started++; if (s === 'mature') r.mature++;
+    }
+  }
+  const topics = [...topicIdx.values()].sort((a, b) => b.total - a.total || a.id.localeCompare(b.id));
+
   // ---- trickiest: lapses + recent misses
   const recentAgain = new Map();
   for (const l of logs) {
@@ -126,7 +137,7 @@ export function computeStats({ deck, cards, states, logs, now = new Date(), heat
     reviews30, recall30: recallN ? recallOk / recallN : null, recallN,
     minutes7: Math.round(ms7 / 60000), streak, todayN, totalReviews: logs.length,
     heat, forecast,
-    lessons: lessonRows, grammar: grammarRows.filter(r => r.total),
+    lessons: lessonRows, grammar: grammarRows.filter(r => r.total), topics,
     trickiest,
   };
 }

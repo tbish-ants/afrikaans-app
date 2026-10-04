@@ -21,8 +21,45 @@ const S = { settings: { ...DEFAULTS }, deck: null, allCards: [], states: new Map
 
 // ---------------------------------------------------------------- utils
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const md = s => esc(s).replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/\*([^*]+)\*/g, '<i>$1</i>')
-  .replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_, a, b) => esc(b || a));
+// ---- tiny markdown: paragraphs, bullet/numbered lists, **bold**, *italic*, `code`, [[links]] (tappable when the note exists)
+function noteRef(name) {
+  if (!S.deck) return null;
+  const n = name.trim();
+  if (S.deck.items['v:' + n]) return 'v:' + n;
+  if (S.deck.items['p:' + n]) return 'p:' + n;
+  if (S.deck.grammar.some(g => g.id === n)) return 'g:' + n;
+  if (S.deck.lessons.some(l => l.id === n)) return 'l:' + n;
+  const low = n.toLowerCase();
+  const g = S.deck.grammar.find(g => (g.aliases || []).some(a => a.toLowerCase() === low));
+  if (g) return 'g:' + g.id;
+  if (S.deck.items['v:' + low]) return 'v:' + low;
+  return null;
+}
+function inline(s) {
+  let t = esc(s);
+  t = t.replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/g, (_, a, b) => {
+    const ref = noteRef(a.replace(/&#39;/g, "'").replace(/&amp;/g, '&'));
+    const label = b || a;
+    return ref ? `<button class="nl" data-sheet="${esc(ref)}">${label}</button>` : `<span class="nl-dead">${label}</span>`;
+  });
+  return t.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<i>$2</i>')
+          .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+function md(text) {
+  const out = []; let list = null;
+  const close = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  for (const raw of String(text || '').split('\n')) {
+    const line = raw.trimEnd();
+    let m;
+    if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) { if (list !== 'ul') { close(); out.push('<ul>'); list = 'ul'; } out.push(`<li>${inline(m[1])}</li>`); }
+    else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) { if (list !== 'ol') { close(); out.push('<ol>'); list = 'ol'; } out.push(`<li>${inline(m[1])}</li>`); }
+    else if ((m = line.match(/^#{1,6}\s+(.*)$/))) { close(); out.push(`<h4>${inline(m[1])}</h4>`); }
+    else if (!line.trim()) close();
+    else { close(); out.push(`<p>${inline(line)}</p>`); }
+  }
+  close();
+  return out.join('');
+}
 const ICON = {
   gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
   back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>',
@@ -124,6 +161,161 @@ async function progressDirty() {
   return (await logStore.since(at)).length > 0;
 }
 
+// ---------------------------------------------------------------- note sheets (words, sentences, grammar, lessons)
+const chipLink = (ref, label) => `<button class="chip chip-link" data-sheet="${esc(ref)}">${label}</button>`;
+function wordListHtml(it) {
+  const vs = (it.words || []).map(w => S.deck.items['v:' + w]).filter(Boolean);
+  if (!vs.length) return '';
+  return `<div class="word-list">${vs.map(v => `<button class="wl" data-sheet="${esc('v:' + v.name)}"><b lang="af">${esc(v.af)}</b> <span>— ${esc(v.en.join(', '))}</span></button>`).join('')}</div>`;
+}
+// indexes for examples (built lazily per deck)
+let IDX = null;
+function indexes() {
+  if (IDX && IDX.deck === S.deck) return IDX;
+  const byWord = new Map(), byGrammar = new Map();
+  for (const [iid, it] of Object.entries(S.deck.items)) {
+    if (it.t !== 'p') continue;
+    (it.words || []).forEach(w => { if (!byWord.has(w)) byWord.set(w, []); byWord.get(w).push(iid); });
+    (it.grammar || []).forEach(g => { if (!byGrammar.has(g)) byGrammar.set(g, []); byGrammar.get(g).push(iid); });
+  }
+  IDX = { deck: S.deck, byWord, byGrammar };
+  return IDX;
+}
+function phraseRows(ids, max = 8) {
+  const shown = ids.slice(0, max).map(id => S.deck.items[id]).filter(Boolean);
+  if (!shown.length) return '<p class="muted small">No example sentences yet.</p>';
+  return `<div class="list">${shown.map(p => `<button class="li" data-sheet="${esc('p:' + p.name)}">
+      <div class="grow"><div lang="af"><b>${esc(p.af)}</b></div><div class="muted small">${esc(p.en.join(' / '))}</div></div><span class="muted">›</span></button>`).join('')}</div>
+    ${ids.length > max ? `<p class="muted small">…and ${ids.length - max} more</p>` : ''}`;
+}
+const refChips = (names, kind = 'v:') => names.map(n => {
+  const ref = noteRef(n);
+  return ref ? chipLink(ref, esc(n)) : `<span class="chip">${esc(n)}</span>`;
+}).join('');
+function stageLabel(iid) {
+  const ss = ['ar', 'ra', 'cz'].map(t => S.states.get(`${iid}|${t}`)).filter(Boolean);
+  if (!ss.length) return 'not studied yet';
+  const best = Math.max(...ss.map(x => x.fsrs.scheduled_days || 0));
+  return best >= 21 ? 'mature' : 'learning';
+}
+
+function sheetBody(ref) {
+  const [kind, ...rest] = ref.split(':'); const key = rest.join(':');
+  const practise = (label, filterArgs) => S.session ? '' :
+    `<button class="btn primary block" data-practise='${esc(JSON.stringify(filterArgs))}'>${label}</button>`;
+  if (kind === 'v' || kind === 'p') {
+    const it = S.deck.items[ref];
+    if (!it) return `<p class="muted">That note isn't in the deck.</p>`;
+    if (it.t === 'v') {
+      const f = it.forms || {};
+      const lab = { plural: 'Plural', diminutive: 'Diminutive', attributive: 'Before a noun', comparative: 'Comparative', superlative: 'Superlative', past_participle: 'Past participle', preterite: 'Past (preterite)', particle: 'Separable particle' };
+      const forms = Object.entries(lab).filter(([k]) => f[k]).map(([k, l]) => `<div class="kv"><span>${l}</span><b lang="af">${esc(f[k])}</b></div>`).join('');
+      const ex = indexes().byWord.get(it.name) || [];
+      return `
+        <div class="sheet-title"><h2 lang="af">${esc(it.af)}</h2>${audioBtn(it.audio)}</div>
+        <p class="en big-en">${esc(it.en.join(' / '))}</p>
+        <div class="facts left">${[it.pos, it.level, it.register].filter(Boolean).map(x => `<span class="chip">${esc(x)}</span>`).join('')}<span class="chip">${stageLabel(ref)}</span></div>
+        ${forms ? `<div class="kvs">${forms}</div>` : ''}
+        ${it.construction ? `<p class="small"><b>Pattern:</b> ${esc(it.construction)}</p>` : ''}
+        ${it.note ? `<div class="md">${md(it.note)}</div>` : ''}
+        ${it.synonyms?.length ? `<h3>Synonyms</h3><div class="facts left">${refChips(it.synonyms)}</div>` : ''}
+        ${it.antonyms?.length ? `<h3>Opposites</h3><div class="facts left">${refChips(it.antonyms)}</div>` : ''}
+        ${it.confusable?.length ? `<h3>Don't confuse with</h3><div class="facts left">${refChips(it.confusable)}</div>` : ''}
+        <h3>Examples (${ex.length})</h3>${phraseRows(ex)}
+        ${it.lessons?.length ? `<h3>Lessons</h3><div class="facts left">${it.lessons.map(l => chipLink('l:' + l, esc(l))).join('')}</div>` : ''}`;
+    }
+    return `
+      <div class="sheet-title"><h2 lang="af" class="sentence">${esc(it.af)}</h2>${audioBtn(it.audio)}</div>
+      <p class="en big-en">${esc(it.en.join(' / '))}</p>
+      <div class="facts left">${[it.kind, it.level, it.register].filter(Boolean).map(x => `<span class="chip">${esc(x)}</span>`).join('')}${it.fav ? '<span class="chip">★ favourite</span>' : ''}<span class="chip">${stageLabel(ref)}</span></div>
+      ${it.corrected_from ? `<p class="small muted">You first wrote: <i lang="af">${esc(it.corrected_from)}</i></p>` : ''}
+      ${it.grammar?.length ? `<h3>Grammar</h3><div class="facts left">${it.grammar.map(g => chipLink('g:' + g, esc(g))).join('')}</div>` : ''}
+      ${it.words?.length ? `<h3>Words</h3>${wordListHtml(it)}` : ''}
+      ${it.note ? `<div class="md">${md(it.note)}</div>` : ''}
+      ${it.lessons?.length ? `<h3>Lesson</h3><div class="facts left">${it.lessons.map(l => chipLink('l:' + l, esc(l))).join('')}</div>` : ''}`;
+  }
+  if (kind === 'g') {
+    const g = S.deck.grammar.find(x => x.id === key);
+    if (!g) return `<p class="muted">No grammar note called “${esc(key)}”.</p>`;
+    const ex = indexes().byGrammar.get(key) || [];
+    const sec = (title, body) => body ? `<h3>${title}</h3><div class="md">${md(body)}</div>` : '';
+    return `
+      <div class="sheet-title"><h2>${esc(g.id)}</h2></div>
+      <div class="facts left">${g.level ? `<span class="chip">${esc(g.level)}</span>` : ''}${g.status !== 'reviewed' ? '<span class="chip chip-draft">Draft</span>' : '<span class="chip">Reviewed</span>'}${(g.aliases || []).map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div>
+      ${g.pattern ? `<p class="pattern" lang="af">${esc(g.pattern)}</p>` : ''}
+      ${sec('Rule', g.rule)}${sec('Patterns', g.patterns)}${sec('Exceptions', g.exceptions)}${sec('Common mistakes', g.mistakes)}
+      ${g.related?.length ? `<h3>Related</h3><div class="facts left">${g.related.map(r => chipLink('g:' + r, esc(r))).join('')}</div>` : ''}
+      <h3>Examples (${ex.length})</h3>${phraseRows(ex)}
+      ${ex.length ? practise('Practise this topic', { grammar: key }) : ''}`;
+  }
+  if (kind === 'l') {
+    const l = S.deck.lessons.find(x => x.id === key);
+    if (!l) return `<p class="muted">No lesson ${esc(key)}.</p>`;
+    return `
+      <div class="sheet-title"><h2>Lesson ${esc(l.date)}</h2></div>
+      ${l.topics?.length ? `<div class="facts left">${l.topics.map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>` : ''}
+      ${l.summary ? `<h3>Summary</h3><div class="md">${md(l.summary)}</div>` : ''}
+      ${l.points ? `<h3>Grammar points</h3><div class="md">${md(l.points)}</div>` : ''}
+      ${l.grammar?.length ? `<h3>Grammar topics</h3><div class="facts left">${l.grammar.map(g => chipLink('g:' + g, esc(g))).join('')}</div>` : ''}
+      ${practise('Practise this lesson', { lesson: key })}`;
+  }
+  return '';
+}
+
+const sheetStack = [];
+const $sheet = document.createElement('div');
+$sheet.id = 'sheet'; $sheet.setAttribute('aria-hidden', 'true');
+$sheet.innerHTML = `<div class="sheet-backdrop"></div><section class="sheet-panel" role="dialog" aria-modal="true">
+  <div class="sheet-head"><span class="grabber"></span>
+    <button class="icon-btn" id="sheet-back" aria-label="Back">${ICON.back}</button><span class="spacer"></span>
+    <button class="icon-btn" id="sheet-close" aria-label="Close">${ICON.close}</button></div>
+  <div class="sheet-body"></div></section>`;
+document.body.appendChild($sheet);
+
+function drawSheet() {
+  if (!sheetStack.length) {
+    $sheet.classList.remove('open'); $sheet.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('sheet-open');
+    return;
+  }
+  const body = $sheet.querySelector('.sheet-body');
+  body.innerHTML = sheetBody(sheetStack[sheetStack.length - 1]);
+  body.scrollTop = 0;
+  $sheet.querySelector('#sheet-back').style.visibility = sheetStack.length > 1 ? 'visible' : 'hidden';
+  $sheet.classList.add('open'); $sheet.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('sheet-open');
+  wireAudio(body);
+  body.querySelectorAll('[data-practise]').forEach(b => b.onclick = () => {
+    const f = JSON.parse(b.dataset.practise);
+    closeSheets(() => startSession({ mode: 'cram', size: 25, filter: makeFilter(f), title: f.lesson ? `Lesson ${f.lesson}` : f.grammar }));
+  });
+}
+function openSheet(ref) {
+  sheetStack.push(ref);
+  history.pushState({ ...(history.state || {}), sheet: sheetStack.length }, '');
+  drawSheet();
+}
+let afterClose = null;
+function closeSheets(then) {
+  if (!sheetStack.length) { then && then(); return; }
+  afterClose = then || null;
+  history.go(-sheetStack.length);
+}
+document.addEventListener('click', e => {
+  const t = e.target.closest('[data-sheet]');
+  if (t) { e.preventDefault(); openSheet(t.dataset.sheet); }
+});
+$sheet.querySelector('.sheet-backdrop').onclick = () => closeSheets();
+$sheet.querySelector('#sheet-close').onclick = () => closeSheets();
+$sheet.querySelector('#sheet-back').onclick = () => history.back();
+// swipe down on the header to close
+(() => {
+  let y0 = null;
+  const head = $sheet.querySelector('.sheet-head');
+  head.addEventListener('touchstart', e => { y0 = e.touches[0].clientY; }, { passive: true });
+  head.addEventListener('touchend', e => { if (y0 != null && e.changedTouches[0].clientY - y0 > 70) closeSheets(); y0 = null; });
+})();
+
 // ---------------------------------------------------------------- router
 const routes = { home, study, practice, settings: settingsView, setup, progress: progressView };
 function go(view, params = {}) {
@@ -132,6 +324,15 @@ function go(view, params = {}) {
 }
 window.addEventListener('popstate', e => {
   const st = e.state || { view: 'home', params: {} };
+  // sheets: going back pops one sheet; never re-render the page underneath
+  const depth = st.sheet || 0;
+  if (sheetStack.length > depth || (sheetStack.length && depth)) {
+    sheetStack.length = depth;
+    drawSheet();
+    if (!depth && afterClose) { const f = afterClose; afterClose = null; f(); }
+    return;
+  }
+  if (afterClose) { const f = afterClose; afterClose = null; f(); return; }
   render(st.view, st.params || {});
 });
 function render(view, params = {}) {
@@ -425,22 +626,22 @@ function showAnswer(card, it, st, result, typedText, ms) {
     if (it.construction) facts.push(esc(it.construction));
     if (it.register) facts.push(esc(it.register));
   } else {
-    (it.grammar || []).forEach(g => facts.push(esc(g)));
+    (it.grammar || []).forEach(g => facts.push(chipLink('g:' + g, esc(g))));
     if (it.register) facts.push(esc(it.register));
   }
-  if (it.lessons && it.lessons.length) facts.push('lesson ' + esc(it.lessons[it.lessons.length - 1]));
+  if (it.lessons && it.lessons.length) { const l = it.lessons[it.lessons.length - 1]; facts.push(chipLink('l:' + l, 'lesson ' + esc(l))); }
 
-  const words = (it.t === 'p'
-    ? `<div class="word-list">${it.words.map(w => S.deck.items['v:' + w]).filter(Boolean).map(v => `<div><b lang="af">${esc(v.af)}</b> — ${esc(v.en.join(', '))}</div>`).join('')}</div>` : '');
+  const words = (it.t === 'p' ? wordListHtml(it) : '');
 
   document.getElementById('answer').innerHTML = `
     <div class="answer">
       ${verdictHtml}
       ${card.type === 'ar' ? '' : `<div class="af" lang="af" style="margin-top:10px">${esc(it.af)}</div>${audioBtn(it.audio)}`}
       <div class="en">${esc(it.en.join(' / '))}</div>
-      ${facts.length ? `<div class="facts">${facts.map(f => `<span class="chip">${f}</span>`).join('')}</div>` : ''}
+      ${facts.length ? `<div class="facts">${facts.map(f => f.startsWith('<button') ? f : `<span class="chip">${f}</span>`).join('')}</div>` : ''}
       ${words}
-      ${it.note ? `<div class="note">${md(it.note)}</div>` : ''}
+      ${it.note ? `<div class="note md">${md(it.note)}</div>` : ''}
+      <button class="btn ghost small-btn" data-sheet="${esc(card.item)}">Open full note ›</button>
     </div>`;
   wireAudio(document.getElementById('answer'));
   if (card.type !== 'ar' && S.settings.autoplay && it.audio) play(it.audio, document.querySelector('#answer [data-audio]'));
@@ -499,6 +700,12 @@ function meter(started, mature, total) {
   const s = pctOf(started - mature, total), m = pctOf(mature, total);
   return `<div class="meter" role="img" aria-label="${m}% mature, ${pctOf(started, total)}% started">
     ${m ? `<i class="m" style="width:${m}%"></i>` : ''}${s ? `<i class="s" style="width:${s}%"></i>` : ''}</div>`;
+}
+
+function topicRows(topics, all) {
+  return (all ? topics : topics.slice(0, 12)).map(t => `
+    <button class="li" data-topic="${esc(t.id)}"><div class="grow"><div class="row"><b>${esc(t.id)}</b><span class="spacer"></span><span class="muted small">${t.total} cards</span></div>
+    ${meter(t.started, t.mature, t.total)}</div><span class="muted small num" title="started">${pctOf(t.started, t.total)}%</span></button>`).join('');
 }
 
 async function progressView() {
@@ -570,13 +777,33 @@ async function progressView() {
       <div class="panel">
         <h2>Grammar</h2>
         <div class="list">${grammar.map(g => `
-          <div class="li"><div class="grow"><div class="row"><b>${esc(g.id)}</b><span class="spacer"></span><span class="muted small">${g.total} cards</span></div>
-          ${meter(g.started, g.mature, g.total)}</div><span class="muted small num" title="started">${pctOf(g.started, g.total)}%</span></div>`).join('')}</div>
+          <div class="li-wrap"><button class="li" data-grammar="${esc(g.id)}"><div class="grow"><div class="row"><b>${esc(g.id)}</b><span class="spacer"></span><span class="muted small">${g.total} cards</span></div>
+          ${meter(g.started, g.mature, g.total)}</div><span class="muted small num" title="started">${pctOf(g.started, g.total)}%</span></button>
+          <button class="icon-btn info" data-sheet="${esc('g:' + g.id)}" aria-label="Read the ${esc(g.id)} note">i</button></div>`).join('')}</div>
+        <p class="muted small">Tap a topic to practise it, or <b>i</b> to read the note.</p>
+      </div>
+
+      <div class="panel">
+        <h2>By topic</h2>
+        <div class="list" id="topics">${topicRows(st.topics, false)}</div>
+        ${st.topics.length > 12 ? `<button class="btn ghost block" id="all-topics">Show all ${st.topics.length} topics</button>` : ''}
+        <p class="muted small">Tap a topic to practise it.</p>
       </div>
       <p class="muted small center">${at ? `Saved to vault ${esc(new Date(at).toLocaleString())} · also in Obsidian under <b>Progress</b>` : 'Not yet saved to the vault'}</p>
     </div>`;
   wireTips($app);
   document.getElementById('back').onclick = () => history.back();
+  const wireTopics = () => $app.querySelectorAll('[data-topic]').forEach(b => b.onclick = () => {
+    const t = b.dataset.topic;
+    startSession({ mode: 'cram', size: 25, filter: makeFilter({ topic: t }), title: t });
+  });
+  wireTopics();
+  const at2 = document.getElementById('all-topics');
+  if (at2) at2.onclick = () => { document.getElementById('topics').innerHTML = topicRows(st.topics, true); at2.remove(); wireTopics(); };
+  $app.querySelectorAll('[data-grammar]').forEach(b => b.onclick = () => {
+    const g = b.dataset.grammar;
+    startSession({ mode: 'cram', size: 25, filter: makeFilter({ grammar: g }), title: g });
+  });
   $app.querySelectorAll('[data-lesson]').forEach(b => b.onclick = () => {
     const id = b.dataset.lesson;
     startSession({ mode: 'cram', size: 25, filter: makeFilter({ lesson: id }), title: `Lesson ${id}` });
@@ -704,6 +931,7 @@ async function settingsView() {
 
 // ---------------------------------------------------------------- boot
 document.addEventListener('keydown', e => {
+  if (sheetStack.length) { if (e.key === 'Escape') closeSheets(); return; }
   if (!S.session) return;
   if (e.target.tagName === 'INPUT') return;
   if (['1', '2', '3', '4'].includes(e.key)) document.querySelector(`.rate[data-r="${e.key}"]`)?.click();
