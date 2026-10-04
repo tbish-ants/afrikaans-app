@@ -152,3 +152,29 @@ export function lineSvg(points, P, { fmt = v => String(v), label = 'value' } = {
   out += `<text x="${X(n - 1)}" y="${H - 6}" font-size="10" text-anchor="end" fill="${P.muted}">Today</text>`;
   return out + '</svg>';
 }
+
+/** Weekly columns (e.g. minutes per week). weeks: [{start: 'YYYY-MM-DD', min}] oldest → newest. */
+export function weeklySvg(weeks, P, { fmt = v => `${Math.round(v)} min` } = {}) {
+  const W = 340, H = 140, left = 4, right = 4, top = 18, bottom = 22;
+  const n = weeks.length, slot = (W - left - right) / n, bw = Math.min(14, slot - 4), ph = H - top - bottom;
+  const max = Math.max(1, ...weeks.map(w => w.min));
+  const maxIdx = weeks.reduce((m, w, i) => (w.min > weeks[m].min ? i : m), 0);
+  let out = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Minutes studied per week, last ${n} weeks" ${FONT}>`;
+  out += `<line x1="${left}" x2="${W - right}" y1="${top + ph + .5}" y2="${top + ph + .5}" stroke="${P.grid}" stroke-width="1"/>`;
+  weeks.forEach((w, i) => {
+    const x = left + i * slot + (slot - bw) / 2, h = (w.min / max) * ph;
+    const tip = `${i === n - 1 ? 'This week' : 'Week of ' + fmtDate(w.start).split(' ').slice(1).join(' ')} · ${fmt(w.min)}`;
+    out += `<g data-tip="${esc(tip)}"><title>${esc(tip)}</title><rect x="${left + i * slot}" y="${top}" width="${slot}" height="${ph}" fill="transparent"/>`;
+    if (w.min > 0) out += `<path d="${colPath(x, top + ph - h, bw, h)}" fill="${P.bar}"/>`;
+    out += '</g>';
+    if ((i === n - 1 || i === maxIdx) && w.min > 0) {
+      const last = i === n - 1;
+      out += `<text x="${last ? x + bw : x + bw / 2}" y="${top + ph - h - 5}" font-size="10" text-anchor="${last ? 'end' : 'middle'}" fill="${P.ink}">${esc(fmt(w.min))}</text>`;
+    }
+  });
+  const lab = i => fmtDate(weeks[i].start).split(' ').slice(1).join(' ');
+  out += `<text x="${left}" y="${H - 6}" font-size="10" fill="${P.muted}">${esc(lab(0))}</text>`;
+  out += `<text x="${left + (n / 2) * slot}" y="${H - 6}" font-size="10" text-anchor="middle" fill="${P.muted}">${esc(lab(Math.floor(n / 2)))}</text>`;
+  out += `<text x="${W - right}" y="${H - 6}" font-size="10" text-anchor="end" fill="${P.muted}">This week</text>`;
+  return out + '</svg>';
+}

@@ -1,6 +1,7 @@
 // Builds the Obsidian progress dashboards (markdown + SVG) from computed stats.
-import { heatmapSvg, forecastSvg, stagesSvg, OBSIDIAN_PALETTE as P } from './charts.js';
+import { heatmapSvg, forecastSvg, stagesSvg, weeklySvg, OBSIDIAN_PALETTE as P } from './charts.js';
 
+const hm = m => (m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`);
 const pct = (a, b) => (b ? Math.round((a / b) * 100) : 0);
 const bar = (p, n = 10) => '▰'.repeat(Math.round((p / 100) * n)) + '▱'.repeat(n - Math.round((p / 100) * n));
 const cellSafe = s => String(s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
@@ -14,6 +15,7 @@ export function dashboardFiles(stats, deck) {
   files['Progress/charts/activity.svg'] = heatmapSvg(s.heat, P);
   files['Progress/charts/forecast.svg'] = forecastSvg(s.forecast, P);
   files['Progress/charts/stages.svg'] = stagesSvg(s.stages, P);
+  files['Progress/charts/time.svg'] = weeklySvg(s.time.weeks, P);
 
   const last7 = s.heat.slice(-7).reverse();
   const grammar = [...s.grammar].sort((a, b) => pct(b.mature, b.total) - pct(a.mature, a.total) || pct(b.started, b.total) - pct(a.started, a.total));
@@ -39,6 +41,8 @@ ${NOTICE}
 | **Reviews, last 30 days** | ${s.reviews30.toLocaleString()} |
 | **Recall, last 30 days** | ${s.recall30 == null ? '—' : Math.round(s.recall30 * 100) + '%'} ${s.recallN ? `(of ${s.recallN} reviews of known cards)` : ''} |
 | **Study time, last 7 days** | ${s.minutes7} min |
+| **Study time, this month** | ${s.time.monthMin} min |
+| **Study time, all time** | ${hm(s.time.allMin)} over ${s.time.studyDays} day${s.time.studyDays === 1 ? '' : 's'}${s.time.firstDay ? ` since ${s.time.firstDay}` : ''} (≈ ${s.time.avgPerStudyDay} min per study day) |
 
 ## Activity
 Reviews per day, last 20 weeks. Darker = more.
@@ -48,6 +52,15 @@ Reviews per day, last 20 weeks. Darker = more.
 | Day | Reviews |
 |---|---:|
 ${last7.map(d => `| ${d.date} | ${d.n} |`).join('\n')}
+
+## Study time
+Minutes per week, last 16 weeks. Each card counts the time from when it appears until you rate it, up to 2 minutes (reviews before 4 Oct 2026 only timed until the answer was shown).
+
+![[Progress/charts/time.svg]]
+
+| Week starting | Minutes | Days studied |
+|---|---:|---:|
+${[...s.time.weeks].reverse().filter(w => w.min > 0 || w.days).map(w => `| ${w.start} | ${Math.round(w.min)} | ${w.days} |`).join('\n') || '| — | 0 | 0 |'}
 
 ## Cards by stage
 *Learning* = still in short steps · *Young* = interval under 21 days · *Mature* = 21 days or more.

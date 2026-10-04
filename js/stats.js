@@ -74,6 +74,31 @@ export function computeStats({ deck, cards, states, logs, now = new Date(), heat
   }
   const todayN = perDay.get(dayKey(now)) || 0;
 
+  // ---- study time: all-time, this month, weekly (Monday-based) for the last 16 weeks
+  const CAP = 120000;
+  let msAll = 0, msMonth = 0;
+  const studyDays = new Set();
+  const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const weekStart = d => { const x = dayStart(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; };
+  const thisWeek = weekStart(now).getTime();
+  const weeks = Array.from({ length: 16 }, (_, i) => {
+    const d = new Date(thisWeek - (15 - i) * 7 * DAY + 12 * 3600e3);
+    return { start: dayKey(d), ms: 0, days: new Set() };
+  });
+  for (const l of logs) {
+    const t = new Date(l.ts); const m = Math.min(l.ms || 0, CAP);
+    msAll += m; studyDays.add(dayKey(t));
+    if (dayKey(t).startsWith(monthKey)) msMonth += m;
+    const wi = 15 - Math.round((thisWeek - weekStart(t).getTime()) / (7 * DAY));
+    if (wi >= 0 && wi < 16) { weeks[wi].ms += m; weeks[wi].days.add(dayKey(t)); }
+  }
+  const time = {
+    allMin: Math.round(msAll / 60000), monthMin: Math.round(msMonth / 60000),
+    studyDays: studyDays.size, avgPerStudyDay: studyDays.size ? Math.round(msAll / 60000 / studyDays.size) : 0,
+    firstDay: logs.length ? dayKey(new Date(logs.reduce((a, l) => (l.ts < a ? l.ts : a), logs[0].ts))) : null,
+    weeks: weeks.map(w => ({ start: w.start, min: Math.round(w.ms / 6000) / 10, days: w.days.size })),
+  };
+
   // ---- forecast (overdue counts as today)
   const forecast = Array.from({ length: forecastDays }, (_, i) => ({ date: dayKey(new Date(today.getTime() + i * DAY + 12 * 3600e3)), n: 0 }));
   for (const st of states.values()) {
@@ -135,7 +160,7 @@ export function computeStats({ deck, cards, states, logs, now = new Date(), heat
     words: { total: wordsTotal, learned: wordsLearned, mastered: wordsMastered },
     sentences: { total: sentTotal, learned: sentLearned, mastered: sentMastered },
     reviews30, recall30: recallN ? recallOk / recallN : null, recallN,
-    minutes7: Math.round(ms7 / 60000), streak, todayN, totalReviews: logs.length,
+    minutes7: Math.round(ms7 / 60000), time, streak, todayN, totalReviews: logs.length,
     heat, forecast,
     lessons: lessonRows, grammar: grammarRows.filter(r => r.total), topics,
     trickiest,
