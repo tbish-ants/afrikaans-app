@@ -7,7 +7,7 @@ import {
 } from './sched.js';
 import { syncProgress } from './sync.js';
 import { computeStats } from './stats.js';
-import { heatmapSvg, forecastSvg, stagesSvg, APP_PALETTE } from './charts.js';
+import { heatmapSvg, forecastSvg, stagesSvg, lineSvg, APP_PALETTE } from './charts.js';
 
 const $app = document.getElementById('app');
 const DEFAULTS = {
@@ -17,6 +17,7 @@ const DEFAULTS = {
   cardTypes: { ar: true, ra: true, cz: true },
 };
 
+const MAX_CARD_MS = 120000;   // time on one card counts up to 2 minutes (longer = you walked away)
 const S = { settings: { ...DEFAULTS }, deck: null, allCards: [], states: new Map(), session: null };
 
 // ---------------------------------------------------------------- utils
@@ -358,12 +359,16 @@ async function home() {
   const now = new Date();
   const c = counts({ allCards: S.allCards, states: S.states, deck: S.deck, settings: S.settings, now });
   const logs = await logStore.since(new Date(dayStart(now) - 13 * 864e5).toISOString());
-  const perDay = new Array(14).fill(0);
+  const perDay = new Array(14).fill(0), msDay = new Array(14).fill(0);
   const ds = dayStart(now).getTime();
   for (const l of logs) {
     const idx = 13 - Math.floor((ds - dayStart(new Date(l.ts)).getTime()) / 864e5);
-    if (idx >= 0 && idx < 14) perDay[idx]++;
+    if (idx >= 0 && idx < 14) { perDay[idx]++; msDay[idx] += Math.min(l.ms || 0, MAX_CARD_MS); }
   }
+  const dayKey = i => { const d = new Date(ds - (13 - i) * 864e5 + 12 * 3600e3); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const minPts = msDay.map((m, i) => ({ date: dayKey(i), v: Math.round(m / 6000) / 10 }));
+  const fmtMin = v => (v < 1 && v > 0 ? '<1 min' : `${Math.round(v)} min`);
+  const week = minPts.slice(7).reduce((a, p) => a + p.v, 0);
   let streak = 0;
   for (let i = 13; i >= 0 && perDay[i] > 0; i--) streak++;
   const max = Math.max(1, ...perDay);
@@ -394,8 +399,14 @@ async function home() {
         <div class="bars">${perDay.map(n => `<i class="${n ? '' : 'zero'}" style="height:${Math.max(4, (n / max) * 100)}%" title="${n}"></i>`).join('')}</div>
         <p class="muted small" style="margin-top:10px">${c.learned} cards started · ${c.newAvail} new waiting · ${Object.keys(S.deck.items).length} notes</p>
       </div>
+      <div class="panel chart">
+        <div class="row"><h2>Time studied</h2><span class="spacer"></span><span class="muted small">${fmtMin(week)} in the last 7 days</span></div>
+        ${lineSvg(minPts, APP_PALETTE, { fmt: fmtMin, label: 'Minutes studied' })}
+        <p class="tip small">Tap a day for details</p>
+      </div>
       <p class="muted small center">Deck built ${esc((S.deck.built || '').slice(0, 16).replace('T', ' '))}${synced ? ` · checked ${esc(new Date(synced).toLocaleString())}` : ''}</p>
     </div>`;
+  wireTips($app);
   document.getElementById('start').onclick = () => startSession({ mode: 'daily' });
   document.getElementById('practice').onclick = () => go('practice');
   document.getElementById('settings').onclick = () => go('settings');
@@ -588,7 +599,7 @@ async function study() {
         result.best = it.en.join(' / ');
       }
     }
-    showAnswer(card, it, st, result, typedText, Date.now() - t0);
+    showAnswer(card, it, st, result, typedText, t0);
   };
 
   if (typing) {
@@ -607,7 +618,7 @@ async function study() {
   }
 }
 
-function showAnswer(card, it, st, result, typedText, ms) {
+function showAnswer(card, it, st, result, typedText, t0) {
   const gap = document.getElementById('gap');
   if (gap) gap.classList.add('filled');
 
@@ -659,7 +670,7 @@ function showAnswer(card, it, st, result, typedText, ms) {
     </div>`;
   document.querySelectorAll('.rate').forEach(b => b.onclick = async () => {
     document.querySelectorAll('.rate').forEach(x => x.disabled = true);
-    await S.session.rate(card, +b.dataset.r, { typed: typedText, verdict: result?.verdict || null, ms });
+    await S.session.rate(card, +b.dataset.r, { typed: typedText, verdict: result?.verdict || null, ms: Math.min(Date.now() - t0, MAX_CARD_MS) });
     study();
   });
   document.activeElement && document.activeElement.blur();
@@ -692,7 +703,12 @@ function finished(early = false) {
 function wireTips(root) {
   root.querySelectorAll('.chart').forEach(ch => {
     const cap = ch.querySelector('.tip');
-    const show = el => { const t = el.closest('[data-tip]'); if (t && cap) cap.textContent = t.dataset.tip; };
+    const show = el => {
+      const t = el.closest('[data-tip]'); if (!t) return;
+      if (cap) cap.textContent = t.dataset.tip;
+      ch.querySelectorAll('.pt.on').forEach(g => g.classList.remove('on'));
+      if (t.classList.contains('pt')) t.classList.add('on');
+    };
     ch.addEventListener('pointerover', e => show(e.target));
     ch.addEventListener('click', e => show(e.target));
   });

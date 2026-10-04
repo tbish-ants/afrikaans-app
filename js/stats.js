@@ -59,7 +59,7 @@ export function computeStats({ deck, cards, states, logs, now = new Date(), heat
       reviews30++;
       if (l.prevState === State.Review) { recallN++; if (l.rating > 1) recallOk++; }
     }
-    if (age < 7 * DAY) ms7 += Math.min(l.ms || 0, 60000);
+    if (age < 7 * DAY) ms7 += Math.min(l.ms || 0, 120000);
   }
   const heat = [];
   for (let i = heatDays - 1; i >= 0; i--) {

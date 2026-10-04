@@ -264,3 +264,5 @@ code { font-size: .85em; background: var(--surface-2); padding: 1px 5px; border-
 .li-wrap .li { border-top: 0; }
 .icon-btn.info { width: 36px; height: 36px; border: 1px solid var(--line); border-radius: 50%; font-weight: 700; font-style: italic; color: var(--brand); flex: none; }
 body.sheet-open { overflow: hidden; }
+.chart g.pt .cross { opacity: 0; transition: opacity .1s; }
+.chart g.pt.on .cross, .chart g.pt:hover .cross { opacity: 1; }

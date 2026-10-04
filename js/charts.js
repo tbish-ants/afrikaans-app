@@ -112,3 +112,43 @@ export function stagesSvg(stages, P) {
   });
   return out + '</svg>';
 }
+
+/**
+ * Single-series line over days (e.g. minutes studied). points: [{date, v}] oldest → newest.
+ * fmt: value formatter for labels/tooltips.
+ */
+export function lineSvg(points, P, { fmt = v => String(v), label = 'value' } = {}) {
+  const W = 340, H = 132, left = 6, right = 14, top = 22, bottom = 22;
+  const n = points.length, pw = W - left - right, ph = H - top - bottom;
+  const max = Math.max(1, ...points.map(p => p.v));
+  const X = i => left + (n === 1 ? pw / 2 : (i / (n - 1)) * pw);
+  const Y = v => top + ph - (v / max) * ph;
+  const pts = points.map((p, i) => [X(i), Y(p.v)]);
+  const line = pts.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`).join('');
+  const area = `${line}L${X(n - 1).toFixed(1)},${top + ph}L${X(0).toFixed(1)},${top + ph}Z`;
+  const maxIdx = points.reduce((m, p, i) => (p.v > points[m].v ? i : m), 0);
+  let out = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(label)} per day, last ${n} days" ${FONT}>`;
+  out += `<line x1="${left}" x2="${W - right}" y1="${top + ph + .5}" y2="${top + ph + .5}" stroke="${P.grid}" stroke-width="1"/>`;
+  out += `<path d="${area}" fill="${P.bar}" fill-opacity="0.12"/>`;
+  out += `<path d="${line}" fill="none" stroke="${P.bar}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  // hover / tap targets with a crosshair
+  const slot = n > 1 ? pw / (n - 1) : pw;
+  points.forEach((p, i) => {
+    const tip = `${i === n - 1 ? 'Today' : fmtDate(p.date)} · ${fmt(p.v)}`;
+    out += `<g class="pt" data-tip="${esc(tip)}"><title>${esc(tip)}</title>`
+      + `<rect x="${Math.max(0, X(i) - slot / 2)}" y="${top - 6}" width="${slot}" height="${ph + 6}" fill="transparent"/>`
+      + `<line class="cross" x1="${X(i)}" x2="${X(i)}" y1="${top - 4}" y2="${top + ph}" stroke="${P.muted}" stroke-width="1"/>`
+      + `<circle class="cross" cx="${X(i)}" cy="${Y(p.v)}" r="4" fill="${P.bar}" stroke="${P.surface === 'none' ? 'transparent' : P.surface}" stroke-width="2"/></g>`;
+  });
+  // end dot + selective labels (latest and peak)
+  const [ex, ey] = pts[n - 1];
+  out += `<circle cx="${ex}" cy="${ey}" r="4" fill="${P.bar}" stroke="${P.surface === 'none' ? 'transparent' : P.surface}" stroke-width="2" pointer-events="none"/>`;
+  out += `<text x="${ex}" y="${ey - 9}" font-size="10" text-anchor="end" fill="${P.ink}" pointer-events="none">${esc(fmt(points[n - 1].v))}</text>`;
+  if (maxIdx !== n - 1 && points[maxIdx].v > 0) {
+    const [mx, my] = pts[maxIdx];
+    out += `<text x="${mx}" y="${my - 9}" font-size="10" text-anchor="${maxIdx === 0 ? 'start' : 'middle'}" fill="${P.ink}" pointer-events="none">${esc(fmt(points[maxIdx].v))}</text>`;
+  }
+  out += `<text x="${X(0)}" y="${H - 6}" font-size="10" fill="${P.muted}">${esc(fmtDate(points[0].date).split(' ').slice(1).join(' '))}</text>`;
+  out += `<text x="${X(n - 1)}" y="${H - 6}" font-size="10" text-anchor="end" fill="${P.muted}">Today</text>`;
+  return out + '</svg>';
+}
