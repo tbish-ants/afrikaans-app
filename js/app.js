@@ -3,11 +3,12 @@ import * as gh from './github.js';
 import { check, englishVariants, diffHtml } from './check.js';
 import {
   buildCards, loadStates, counts, buildQueue, Session, preview, fmtInterval,
-  markKnown, dayStart, TYPE_LABEL, Rating, configure,
+  markKnown, dayStart, TYPE_LABEL, Rating, configure, wordPools, WORD_SESSION,
 } from './sched.js';
 import { syncProgress } from './sync.js';
-import { loadHidden, saveHidden, hiddenIds, addSuggestion, pendingSuggestions, ctxLabel, SUGGEST_PATH } from './extras.js';
-import { computeStats } from './stats.js';
+import { loadHidden, saveHidden, hiddenIds, addSuggestion, pendingSuggestions, ctxLabel, SUGGEST_PATH,
+  loadPinned, savePinned, loadRecent, saveRecent, pinnedKeys, pushRecent } from './extras.js';
+import { computeStats, stage } from './stats.js';
 import { heatmapSvg, forecastSvg, stagesSvg, lineSvg, APP_PALETTE } from './charts.js';
 
 const $app = document.getElementById('app');
@@ -19,7 +20,7 @@ const DEFAULTS = {
 };
 
 const MAX_CARD_MS = 120000;   // time on one card counts up to 2 minutes (longer = you walked away)
-const S = { settings: { ...DEFAULTS }, deck: null, allCards: [], states: new Map(), session: null, hidden: {}, current: null, view: 'home' };
+const S = { settings: { ...DEFAULTS }, deck: null, allCards: [], states: new Map(), session: null, hidden: {}, pinned: {}, recent: [], current: null, view: 'home' };
 // hidden notes never come up in reviews or practice (they stay in the deck, Browse and the vault)
 const isHidden = iid => !!S.hidden[iid]?.on;
 const activeCards = () => S.allCards.filter(c => !isHidden(c.item));
@@ -116,6 +117,7 @@ const ICON = {
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>',
   chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   bulb: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2V16h5v-.1c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 3h6l-1 6 3 3v2H7v-2l3-3-1-6z"/></svg>',
   eyeOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.9 17.9A10 10 0 0 1 12 20c-7 0-10-8-10-8a18 18 0 0 1 4.1-5.9M9.9 4.2A9 9 0 0 1 12 4c7 0 10 8 10 8a18 18 0 0 1-2.2 3.2M14.1 14.1a3 3 0 1 1-4.2-4.2M2 2l20 20"/></svg>',
   sync: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16M3 12a9 9 0 0 1 15.5-6.3L21 8"/><path d="M21 3v5h-5M3 21v-5h5"/></svg>',
 };
@@ -174,6 +176,8 @@ async function loadAll() {
   if (S.deck) S.allCards = buildCards(S.deck);
   S.states = await loadStates();
   S.hidden = await loadHidden();
+  S.pinned = await loadPinned();
+  S.recent = await loadRecent();
 }
 
 async function syncDeck({ force = false, quiet = false } = {}) {
@@ -205,6 +209,7 @@ async function saveProgress({ quiet = false } = {}) {
       const r = await syncProgress({ deck: S.deck });
       if (!S.session) S.states = await loadStates();
       if (r.hiddenPulled) S.hidden = await loadHidden();
+      if (r.pinnedPulled) { S.pinned = await loadPinned(); S.recent = await loadRecent(); if (S.view === 'home' && !S.session) home(); }
       if (r.restored) toast(`Restored your progress from the vault (${r.pulledCards} cards)`, 4000);
       else if (!quiet && r.committed) toast('Progress saved to your vault');
       else if (r.suggestions) toast(`Suggestion${r.suggestions === 1 ? '' : 's'} sent to Obsidian ✓`);
@@ -291,6 +296,66 @@ function hideWithUndo(iid) {
   toast(`Hidden “${it ? it.af : iid}” — it won't come up again`, 5000, { label: 'Undo', fn: async () => { await setHidden(iid, false); toast('Unhidden'); if (!S.session) refreshUnderSheet(iid); } });
 }
 
+// ---------------------------------------------------------------- pinned + recently practised (Home quick practise)
+// target keys: "topic:<name>" | "lesson:<id>" | "grammar:<id>"
+const splitKey = key => { const i = key.indexOf(':'); return [key.slice(0, i), key.slice(i + 1)]; };
+const isPinned = key => !!S.pinned[key]?.on;
+function targetInfo(key) {
+  const [kind, id] = splitKey(key);
+  if (kind === 'lesson') { const l = S.deck.lessons.find(x => x.id === id); return l && { kind, id, label: `Lesson ${l.date}`, sub: 'lesson' }; }
+  if (kind === 'grammar') return S.deck.grammar.some(g => g.id === id) ? { kind, id, label: id, sub: 'grammar' } : null;
+  if (kind === 'topic') return Object.values(S.deck.items).some(it => (it.topics || []).includes(id)) ? { kind, id, label: id, sub: 'topic' } : null;
+  return null;
+}
+const targetFilter = key => { const [kind, id] = splitKey(key); return makeFilter({ [kind]: id }); };
+function practiseTarget(key) {
+  const t = targetInfo(key);
+  if (t) startSession({ mode: 'cram', size: 25, filter: targetFilter(key), title: t.label, target: key });
+}
+// same numbers as the Progress screen: all cards (hidden included), % of cards started, bar = mature + started
+function targetStats(key) {
+  const f = targetFilter(key);
+  let total = 0, started = 0, mature = 0;
+  for (const c of S.allCards) {
+    if (!f(c, S.deck.items[c.item])) continue;
+    const s = stage(S.states.get(c.id));
+    total++; if (s !== 'new') started++; if (s === 'mature') mature++;
+  }
+  return { total, started, mature };
+}
+const pinBtn = (key, label) => `<button class="icon-btn pin ${isPinned(key) ? 'on' : ''}" data-pin="${esc(key)}" aria-pressed="${isPinned(key)}"
+  aria-label="${isPinned(key) ? 'Unpin' : 'Pin'} ${esc(label)} ${isPinned(key) ? 'from' : 'to'} Home">${ICON.pin}</button>`;
+let pinSaveT;
+async function togglePin(key) {
+  const on = !isPinned(key);
+  S.pinned = { ...S.pinned, [key]: { ts: Date.now(), on } };
+  await savePinned(S.pinned);
+  await kv.set('syncPending', true);
+  document.querySelectorAll(`[data-pin="${CSS.escape(key)}"]`).forEach(b => {
+    b.classList.toggle('on', on); b.setAttribute('aria-pressed', on);
+    b.setAttribute('aria-label', (b.getAttribute('aria-label') || '').replace(/^(Pin|Unpin) (.*) (to|from) Home$/, `${on ? 'Unpin' : 'Pin'} $2 ${on ? 'from' : 'to'} Home`));
+  });
+  toast(on ? 'Pinned to Home' : 'Unpinned');
+  if (S.view === 'home' && !S.session) home();
+  clearTimeout(pinSaveT);
+  if (!S.session) pinSaveT = setTimeout(() => saveProgress({ quiet: true }), 4000);   // a few taps in a row = one save
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-pin]');
+  if (!b) return;
+  e.preventDefault(); e.stopPropagation();
+  togglePin(b.dataset.pin);
+});
+function quickRows() {
+  const pins = pinnedKeys(S.pinned).filter(targetInfo);
+  const recent = S.recent.map(r => r.key).filter(k => !isPinned(k) && targetInfo(k));
+  return [...pins, ...recent].map(key => {
+    const t = targetInfo(key), n = targetStats(key);
+    return `<div class="li-wrap"><button class="li" data-target="${esc(key)}"><div class="grow"><div class="row"><b class="ellipsis">${esc(t.label)}</b><span class="spacer"></span><span class="muted small">${t.sub}</span></div>
+      ${meter(n.started, n.mature, n.total)}</div><span class="muted small num" title="started">${pctOf(n.started, n.total)}%</span></button>${pinBtn(key, t.label)}</div>`;
+  }).join('');
+}
+
 function sheetBody(ref) {
   const [kind, ...rest] = ref.split(':'); const key = rest.join(':');
   const practise = (label, filterArgs) => S.session ? '' :
@@ -336,7 +401,7 @@ function sheetBody(ref) {
     const ex = indexes().byGrammar.get(key) || [];
     const sec = (title, body) => body ? `<h3>${title}</h3><div class="md">${md(body)}</div>` : '';
     return `
-      <div class="sheet-title"><h2>${esc(g.id)}</h2></div>
+      <div class="sheet-title"><h2>${esc(g.id)}</h2><span class="spacer"></span>${pinBtn('grammar:' + g.id, g.id)}</div>
       <div class="facts left">${g.level ? `<span class="chip">${esc(g.level)}</span>` : ''}${g.status !== 'reviewed' ? '<span class="chip chip-draft">Draft</span>' : '<span class="chip">Reviewed</span>'}${(g.aliases || []).map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div>
       ${g.pattern ? `<p class="pattern" lang="af">${esc(g.pattern)}</p>` : ''}
       ${g.sections?.length ? g.sections.map(([t, b]) => t ? sec(esc(t), b) : `<div class="md">${md(b)}</div>`).join('')
@@ -349,7 +414,7 @@ function sheetBody(ref) {
     const l = S.deck.lessons.find(x => x.id === key);
     if (!l) return `<p class="muted">No lesson ${esc(key)}.</p>`;
     return `
-      <div class="sheet-title"><h2>Lesson ${esc(l.date)}</h2></div>
+      <div class="sheet-title"><h2>Lesson ${esc(l.date)}</h2><span class="spacer"></span>${pinBtn('lesson:' + l.id, 'Lesson ' + l.date)}</div>
       ${l.topics?.length ? `<div class="facts left">${l.topics.map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>` : ''}
       ${l.summary ? `<h3>Summary</h3><div class="md">${md(l.summary)}</div>` : ''}
       ${l.points ? `<h3>Grammar points</h3><div class="md">${md(l.points)}</div>` : ''}
@@ -413,7 +478,8 @@ function drawSheet() {
   wireAudio(body);
   body.querySelectorAll('[data-practise]').forEach(b => b.onclick = () => {
     const f = JSON.parse(b.dataset.practise);
-    closeSheets(() => startSession({ mode: f.mode || 'cram', size: 25, filter: makeFilter(f), title: f.lesson ? `Lesson ${f.lesson}` : f.grammar }));
+    const target = f.lesson ? 'lesson:' + f.lesson : f.grammar ? 'grammar:' + f.grammar : null;
+    closeSheets(() => startSession({ mode: f.mode || 'cram', size: 25, filter: makeFilter(f), title: f.lesson ? `Lesson ${f.lesson}` : f.grammar, target }));
   });
   body.querySelectorAll('[data-hide]').forEach(b => b.onclick = async () => {
     const top = body.scrollTop;
@@ -515,6 +581,9 @@ async function home() {
   const synced = await kv.get('deckSyncedAt');
   const lessons = S.deck.lessons;
   const latest = lessons[lessons.length - 1];
+  const pools = wordPools({ allCards: activeCards(), states: S.states, deck: S.deck, settings: S.settings, now });
+  const nFresh = pools.fresh.length, nLearning = pools.learning.length;
+  const quick = quickRows();
 
   $app.innerHTML = `
     <div class="bar">
@@ -534,6 +603,15 @@ async function home() {
         ${c.due + c.newToday ? 'Start review' : 'All done for today 🎉'}
       </button>
       <button class="btn block" id="practice">Practise a lesson or topic…</button>
+      <div class="row two">
+        <button class="btn word-btn" id="new-words" ${nFresh ? '' : 'disabled'}><span>Learn new words</span><span class="muted small">${nFresh.toLocaleString()} to learn</span></button>
+        <button class="btn word-btn" id="learning-words" ${nLearning ? '' : 'disabled'}><span>Words you're learning</span><span class="muted small">${nLearning.toLocaleString()} in progress</span></button>
+      </div>
+      <div class="panel">
+        <div class="row"><h2>Quick practise</h2><span class="spacer"></span><span class="muted small">25 cards</span></div>
+        ${quick ? `<div class="list" id="quick">${quick}</div>`
+          : `<p class="muted small">Pin a topic, lesson or grammar point (${ICON.pin.replace('<svg', '<svg class="inline-ico"')}) on the Progress screen or in a note, and it'll show up here, along with what you practised recently.</p>`}
+      </div>
       <button class="btn block" id="browse2">${ICON.search} Browse words, sentences &amp; grammar</button>
       ${latest ? `<button class="btn block ghost" id="latest">Drill latest lesson (${esc(latest.date)})</button>` : ''}
       <div class="panel">
@@ -559,7 +637,10 @@ async function home() {
   const hl = document.getElementById('hidden-link'); if (hl) hl.onclick = () => go('hidden');
   document.getElementById('sync').onclick = async () => { await syncDeck({ force: false }); await saveProgress(); home(); };
   const l = document.getElementById('latest');
-  if (l) l.onclick = () => startSession({ mode: 'cram', size: 25, filter: makeFilter({ lesson: latest.id }), title: `Lesson ${latest.date}` });
+  if (l) l.onclick = () => startSession({ mode: 'cram', size: 25, filter: makeFilter({ lesson: latest.id }), title: `Lesson ${latest.date}`, target: 'lesson:' + latest.id });
+  document.getElementById('new-words').onclick = () => startSession({ mode: 'words', size: WORD_SESSION, title: 'New words' });
+  document.getElementById('learning-words').onclick = () => startSession({ mode: 'learning', size: WORD_SESSION, title: "Words you're learning" });
+  $app.querySelectorAll('[data-target]').forEach(b => b.onclick = () => practiseTarget(b.dataset.target));
 }
 
 // ---------------------------------------------------------------- practice (filters)
@@ -649,7 +730,9 @@ async function practice() {
     const f = read();
     await kv.set('practiceFilter', f);
     const label = f.lesson ? `Lesson ${f.lesson}` : f.topic || f.grammar || 'Practice';
-    startSession({ mode: f.mode, size: f.size, filter: makeFilter(f), title: label });
+    const picked = [['lesson', f.lesson], ['topic', f.topic], ['grammar', f.grammar]].filter(([, v]) => v);
+    const target = picked.length === 1 ? `${picked[0][0]}:${picked[0][1]}` : null;   // remembered for Home's quick practise
+    startSession({ mode: f.mode, size: f.size, filter: makeFilter(f), title: label, target });
   };
   document.getElementById('back').onclick = () => history.back();
   const kb = document.getElementById('known');
@@ -665,9 +748,11 @@ async function practice() {
 }
 
 // ---------------------------------------------------------------- study session
-function startSession({ mode, size = 0, filter = null, title = 'Review' }) {
+const EMPTY_MSG = { new: 'No new cards left in this selection', words: 'No new words left to learn', learning: 'No words in progress right now' };
+function startSession({ mode, size = 0, filter = null, title = 'Review', target = null }) {
   const queue = buildQueue({ allCards: activeCards(), states: S.states, deck: S.deck, settings: S.settings, filter, mode, size });
-  if (!queue.length) { toast(mode === 'new' ? 'No new cards left in this selection' : 'Nothing to study with those settings'); return; }
+  if (!queue.length) { toast(EMPTY_MSG[mode] || 'Nothing to study with those settings'); return; }
+  if (target) { S.recent = pushRecent(S.recent, target); saveRecent(S.recent); }
   S.session = new Session(queue, S.states, mode);
   S.session.title = title;
   // fetch audio for this session in the background
@@ -873,8 +958,8 @@ function meter(started, mature, total) {
 
 function topicRows(topics, all) {
   return (all ? topics : topics.slice(0, 12)).map(t => `
-    <button class="li" data-topic="${esc(t.id)}"><div class="grow"><div class="row"><b>${esc(t.id)}</b><span class="spacer"></span><span class="muted small">${t.total} cards</span></div>
-    ${meter(t.started, t.mature, t.total)}</div><span class="muted small num" title="started">${pctOf(t.started, t.total)}%</span></button>`).join('');
+    <div class="li-wrap"><button class="li" data-topic="${esc(t.id)}"><div class="grow"><div class="row"><b>${esc(t.id)}</b><span class="spacer"></span><span class="muted small">${t.total} cards</span></div>
+    ${meter(t.started, t.mature, t.total)}</div><span class="muted small num" title="started">${pctOf(t.started, t.total)}%</span></button>${pinBtn('topic:' + t.id, t.id)}</div>`).join('');
 }
 
 async function progressView() {
@@ -935,12 +1020,12 @@ async function progressView() {
         <h2>By lesson</h2>
         <div class="legend small"><span><i class="sw m"></i>Mature</span><span><i class="sw s"></i>Started</span><span class="spacer"></span><span>% started</span></div>
         <div class="list">${lessons.map(l => `
-          <button class="li lesson" data-lesson="${esc(l.id)}">
+          <div class="li-wrap"><button class="li lesson" data-lesson="${esc(l.id)}">
             <div class="grow"><div class="row"><b>${esc(l.date)}</b><span class="muted small ellipsis">${esc(l.topics.slice(0, 3).join(', '))}</span></div>
             ${meter(l.started, l.mature, l.total)}</div>
             <span class="muted small num" title="started">${pctOf(l.started, l.total)}%</span>
-          </button>`).join('')}</div>
-        <p class="muted small">Tap a lesson to practise it.</p>
+          </button>${pinBtn('lesson:' + l.id, 'Lesson ' + l.date)}</div>`).join('')}</div>
+        <p class="muted small">Tap a lesson to practise it. Pin one to keep it on Home.</p>
       </div>
 
       <div class="panel">
@@ -948,15 +1033,15 @@ async function progressView() {
         <div class="list">${grammar.map(g => `
           <div class="li-wrap"><button class="li" data-grammar="${esc(g.id)}"><div class="grow"><div class="row"><b>${esc(g.id)}</b><span class="spacer"></span><span class="muted small">${g.total} cards</span></div>
           ${meter(g.started, g.mature, g.total)}</div><span class="muted small num" title="started">${pctOf(g.started, g.total)}%</span></button>
-          <button class="icon-btn info" data-sheet="${esc('g:' + g.id)}" aria-label="Read the ${esc(g.id)} note">i</button></div>`).join('')}</div>
-        <p class="muted small">Tap a topic to practise it, or <b>i</b> to read the note.</p>
+          ${pinBtn('grammar:' + g.id, g.id)}<button class="icon-btn info" data-sheet="${esc('g:' + g.id)}" aria-label="Read the ${esc(g.id)} note">i</button></div>`).join('')}</div>
+        <p class="muted small">Tap a topic to practise it, or <b>i</b> to read the note. Pin one to keep it on Home.</p>
       </div>
 
       <div class="panel">
         <h2>By topic</h2>
         <div class="list" id="topics">${topicRows(st.topics, false)}</div>
         ${st.topics.length > 12 ? `<button class="btn ghost block" id="all-topics">Show all ${st.topics.length} topics</button>` : ''}
-        <p class="muted small">Tap a topic to practise it.</p>
+        <p class="muted small">Tap a topic to practise it. Pin one to keep it on Home.</p>
       </div>
       <p class="muted small center">${at ? `Saved to vault ${esc(new Date(at).toLocaleString())} · also in Obsidian under <b>Progress</b>` : 'Not yet saved to the vault'}</p>
     </div>`;
@@ -964,18 +1049,18 @@ async function progressView() {
   document.getElementById('back').onclick = () => history.back();
   const wireTopics = () => $app.querySelectorAll('[data-topic]').forEach(b => b.onclick = () => {
     const t = b.dataset.topic;
-    startSession({ mode: 'cram', size: 25, filter: makeFilter({ topic: t }), title: t });
+    startSession({ mode: 'cram', size: 25, filter: makeFilter({ topic: t }), title: t, target: 'topic:' + t });
   });
   wireTopics();
   const at2 = document.getElementById('all-topics');
   if (at2) at2.onclick = () => { document.getElementById('topics').innerHTML = topicRows(st.topics, true); at2.remove(); wireTopics(); };
   $app.querySelectorAll('[data-grammar]').forEach(b => b.onclick = () => {
     const g = b.dataset.grammar;
-    startSession({ mode: 'cram', size: 25, filter: makeFilter({ grammar: g }), title: g });
+    startSession({ mode: 'cram', size: 25, filter: makeFilter({ grammar: g }), title: g, target: 'grammar:' + g });
   });
   $app.querySelectorAll('[data-lesson]').forEach(b => b.onclick = () => {
     const id = b.dataset.lesson;
-    startSession({ mode: 'cram', size: 25, filter: makeFilter({ lesson: id }), title: `Lesson ${id}` });
+    startSession({ mode: 'cram', size: 25, filter: makeFilter({ lesson: id }), title: `Lesson ${id}`, target: 'lesson:' + id });
   });
   const tb = document.getElementById('tricky');
   if (tb) tb.onclick = () => {
@@ -1307,7 +1392,7 @@ async function settingsView() {
   };
   document.getElementById('export').onclick = async () => {
     const data = { app: 'afrikaans', version: 1, exported: new Date().toISOString(),
-      cards: await cardStore.all(), log: await logStore.all(), hidden: S.hidden, settings: { ...S.settings, token: '' } };
+      cards: await cardStore.all(), log: await logStore.all(), hidden: S.hidden, pinned: S.pinned, recent: S.recent, settings: { ...S.settings, token: '' } };
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
     a.download = `afrikaans-progress-${new Date().toISOString().slice(0, 10)}.json`;
@@ -1321,6 +1406,8 @@ async function settingsView() {
       await cardStore.clear(); await cardStore.putMany(data.cards || []);
       await logStore.clear(); await logStore.addMany((data.log || []));
       if (data.hidden) { S.hidden = data.hidden; await saveHidden(S.hidden); }
+      if (data.pinned) { S.pinned = data.pinned; await savePinned(S.pinned); }
+      if (data.recent) { S.recent = data.recent; await saveRecent(S.recent); }
       S.states = await loadStates();
       toast(`Restored ${data.cards.length} cards`);
     } catch (err) { toast(err.message, 4000); }

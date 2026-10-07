@@ -24,6 +24,38 @@ export function hiddenFile(h) {
   return `{"format":"afrikaans-hidden/1","fields":["changed_ms","hidden"],\n"notes":{\n${ids.map(id => `${JSON.stringify(id)}:[${h[id].ts},${h[id].on ? 1 : 0}]`).join(',\n')}\n}}\n`;
 }
 
+// ---------------------------------------------------------------- pinned + recently practised (Home quick practise)
+// target keys: "topic:<name>" | "lesson:<id>" | "grammar:<id>"
+// local: kv pinned = { key: { ts, on } } (unpins kept as on:false so they sync); kv recent = [{ key, ts }] newest first
+export const RECENT_MAX = 6;
+export async function loadPinned() { return (await kv.get('pinned')) || {}; }
+export async function savePinned(p) { await kv.set('pinned', p); }
+export async function loadRecent() { return (await kv.get('recent')) || []; }
+export async function saveRecent(r) { await kv.set('recent', r); }
+export const pinnedKeys = p => Object.keys(p).filter(k => p[k].on).sort((a, b) => p[a].ts - p[b].ts);
+export const pushRecent = (list, key, ts = Date.now()) => [{ key, ts }, ...list.filter(r => r.key !== key)].slice(0, RECENT_MAX);
+
+/** Merge the vault copy into the local one. */
+export function mergePinned(localPinned, localRecent, remoteTxt) {
+  const pinned = { ...localPinned };
+  let recent = localRecent.slice(), changed = false;
+  if (remoteTxt) {
+    const j = JSON.parse(remoteTxt);
+    for (const [k, [ts, on]] of Object.entries(j.pinned || {})) {
+      if (!pinned[k] || ts > pinned[k].ts) { pinned[k] = { ts, on: !!on }; changed = true; }
+    }
+    const byKey = new Map(recent.map(r => [r.key, r.ts]));
+    for (const [k, ts] of j.recent || []) if (!byKey.has(k) || ts > byKey.get(k)) byKey.set(k, ts);
+    const next = [...byKey].map(([key, ts]) => ({ key, ts })).sort((a, b) => b.ts - a.ts).slice(0, RECENT_MAX);
+    if (JSON.stringify(next) !== JSON.stringify(recent)) { recent = next; changed = true; }
+  }
+  return { pinned, recent, changed };
+}
+export function pinnedFile(pinned, recent) {
+  const ids = Object.keys(pinned).sort();
+  return `{"format":"afrikaans-pinned/1","fields":["changed_ms","pinned"],\n"pinned":{\n${ids.map(id => `${JSON.stringify(id)}:[${pinned[id].ts},${pinned[id].on ? 1 : 0}]`).join(',\n')}\n},\n"recent":${JSON.stringify(recent.map(r => [r.key, r.ts]))}}\n`;
+}
+
 // ---------------------------------------------------------------- suggestions
 // [{ id, ts, text, ctx: { screen, note, noteLabel, card }, sent: bool }]
 export const SUGGEST_PATH = 'Inbox/App suggestions.md';

@@ -101,6 +101,7 @@ export function counts({ allCards, states, deck, settings, now = new Date(), fil
  * Build a study queue.
  * mode 'daily': due cards + new cards up to the daily limit.
  * mode 'cram':  any cards matching the filter, due first, then the rest (incl. new), shuffled; size-limited.
+ * mode 'words' / 'learning': the Home word buttons (see wordPools).
  */
 export function buildQueue({ allCards, states, deck, settings, now = new Date(), filter = null, mode = 'daily', size = 0 }) {
   const start = dayStart(now);
@@ -137,6 +138,10 @@ export function buildQueue({ allCards, states, deck, settings, now = new Date(),
     return out;
   };
 
+  if (mode === 'words' || mode === 'learning') {
+    const pools = wordPools({ allCards: cands, states, deck, settings, now });
+    return shuffle((mode === 'words' ? pools.fresh : pools.learning).slice(0, size || WORD_SESSION).map(n => n.card));
+  }
   if (mode === 'new') {
     // only cards never studied: meaning cards for unseen notes, plus say-it/gap cards once unlocked.
     // Ignores the daily new-card limit (you chose to do this), still one card per note.
@@ -158,6 +163,61 @@ export function buildQueue({ allCards, states, deck, settings, now = new Date(),
   revs.forEach((c, i) => { q.push(c); if (gap && (i + 1) % gap === 0 && ni < news.length) q.push(news[ni++]); });
   while (ni < news.length) q.push(news[ni++]);
   return q;
+}
+
+// ---------------------------------------------------------------- Home word buttons
+export const WORD_SESSION = 20;
+const NEW_MAX_REPS = 2;     // "new words" = never seen, or seen at most this many times in total
+const MATURE = 21;          // same as stats.js MATURE_DAYS
+const TYPE_ORDER = { ar: 0, ra: 1, cz: 2 };
+
+/**
+ * Vocab notes split for the Home buttons (one card picked per note):
+ *  fresh    — never studied, or ≤2 reviews in total (not marked known). Never-seen first, in the new-card order.
+ *  learning — started, >2 reviews, not every card mature. Weakest first: most lapses, lowest recall, most overdue.
+ * allCards should already exclude hidden notes.
+ */
+export function wordPools({ allCards, states, deck, settings, now = new Date() }) {
+  const typesOn = settings.cardTypes || { ar: true, ra: true, cz: true };
+  const byNote = new Map();
+  for (const c of allCards) {
+    const it = deck.items[c.item];
+    if (!it || it.t !== 'v' || typesOn[c.type] === false) continue;
+    if (!byNote.has(c.item)) byNote.set(c.item, []);
+    byNote.get(c.item).push(c);
+  }
+  const fresh = [], learning = [];
+  for (const [item, cs] of byNote) {
+    cs.sort((a, b) => TYPE_ORDER[a.type] - TYPE_ORDER[b.type]);
+    const started = cs.filter(c => states.has(c.id));
+    const ss = started.map(c => states.get(c.id));
+    const reps = ss.reduce((a, s) => a + (s.fsrs.reps || 0), 0);
+    if (reps <= NEW_MAX_REPS) {
+      if (ss.some(s => s.known)) continue;   // marked "already know these"
+      // a due card first, then an unseen card that's unlocked, then any started card, then the meaning card
+      const card = started.find(c => isDue(states.get(c.id), now))
+        || cs.find(c => !states.has(c.id) && unlocked(c, states, now))
+        || started[0] || cs[0];
+      fresh.push({ item, card, seen: started.length > 0, first: deck.items[item].first || '' });
+      continue;
+    }
+    const mature = cs.every(c => { const s = states.get(c.id); return s && s.fsrs.state === State.Review && (s.fsrs.scheduled_days || 0) >= MATURE; });
+    if (mature) continue;
+    let card = null, minR = 2, lapses = 0, overdue = -Infinity;
+    for (const c of started) {
+      const f = states.get(c.id).fsrs;
+      const r = f.state === State.New ? 0 : F.get_retrievability(f, now, false);
+      lapses = Math.max(lapses, f.lapses || 0);
+      overdue = Math.max(overdue, now - f.due);
+      if (r < minR) { minR = r; card = c; }
+    }
+    learning.push({ item, card: card || started[0], lapses, r: minR, overdue });
+  }
+  const order = settings.newOrder || 'newest';
+  fresh.sort((a, b) => (a.seen - b.seen) || (order === 'oldest' ? a.first.localeCompare(b.first) : b.first.localeCompare(a.first)) || a.item.localeCompare(b.item));
+  if (order === 'random') { const unseen = fresh.filter(n => !n.seen), seen = fresh.filter(n => n.seen); fresh.splice(0, fresh.length, ...shuffle(unseen), ...shuffle(seen)); }
+  learning.sort((a, b) => b.lapses - a.lapses || a.r - b.r || b.overdue - a.overdue);
+  return { fresh, learning };
 }
 
 const isLearning = s => s && (s.fsrs.state === State.Learning || s.fsrs.state === State.Relearning);

@@ -1,5 +1,5 @@
 // Offline support: cache the app shell. Deck + audio are stored by the app itself.
-const VERSION = 'v12';
+const VERSION = 'v13';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/store.js', 'js/github.js', 'js/check.js', 'js/sched.js', 'js/sync.js', 'js/stats.js', 'js/charts.js', 'js/obsidian.js', 'js/extras.js',

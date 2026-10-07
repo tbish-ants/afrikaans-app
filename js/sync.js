@@ -4,15 +4,16 @@ import { kv, cards as cardStore, log as logStore } from './store.js';
 import { loadStates, buildCards } from './sched.js';
 import { computeStats } from './stats.js';
 import { dashboardFiles } from './obsidian.js';
-import { loadHidden, saveHidden, mergeHidden, hiddenFile, hiddenIds, pendingSuggestions, appendSuggestions, markSent, SUGGEST_PATH } from './extras.js';
+import { loadHidden, saveHidden, mergeHidden, hiddenFile, hiddenIds, pendingSuggestions, appendSuggestions, markSent, SUGGEST_PATH,
+  loadPinned, savePinned, loadRecent, saveRecent, mergePinned, pinnedFile } from './extras.js';
 
 const DIR = '_app/progress';
 const sec = d => (d ? Math.round(new Date(d).getTime() / 1000) : 0);
 const fromSec = s => (s ? new Date(s * 1000) : undefined);
 const r4 = x => Math.round((x || 0) * 1e4) / 1e4;
 const VERDICT = ['exact', 'accent', 'close', 'wrong'];
-const MODE = { daily: 'd', cram: 'c', new: 'n' };
-const MODE_R = { d: 'daily', c: 'cram', n: 'new' };
+const MODE = { daily: 'd', cram: 'c', new: 'n', words: 'w', learning: 'l' };
+const MODE_R = { d: 'daily', c: 'cram', n: 'new', w: 'words', l: 'learning' };
 
 // ---------------------------------------------------------------- (de)serialise
 function cardToRow(st) {
@@ -113,6 +114,13 @@ export async function syncProgress({ deck, onStatus = () => {} } = {}) {
   const hiddenTxt = Object.keys(hidden).length ? hiddenFile(hidden) : null;
   const hiddenChanged = hiddenTxt !== null && hiddenTxt !== remoteHidden;
 
+  // ---- pinned + recently practised (Home): newest change per pin wins, recent lists are combined
+  const remotePinned = await getText(`${DIR}/pinned.json`);
+  const pm = mergePinned(await loadPinned(), await loadRecent(), remotePinned);
+  if (pm.changed) { await savePinned(pm.pinned); await saveRecent(pm.recent); }
+  const pinnedTxt = Object.keys(pm.pinned).length || pm.recent.length ? pinnedFile(pm.pinned, pm.recent) : null;
+  const pinnedChanged = pinnedTxt !== null && pinnedTxt !== remotePinned;
+
   // ---- review log: monthly files, union by (time, card)
   const remoteMonths = (await listDir(DIR)).filter(n => /^log-\d{4}-\d{2}\.jsonl$/.test(n)).map(n => n.slice(4, 11));
   const localByMonth = new Map();
@@ -150,9 +158,9 @@ export async function syncProgress({ deck, onStatus = () => {} } = {}) {
 
   // ---- write cards + dashboards (skip entirely if nothing changed)
   const cardsTxt = cardsFile(localStates);
-  const progressChanged = !(cardsTxt === remoteTxt || (!remoteTxt && localStates.size === 0)) || Object.keys(files).length > 0 || hiddenChanged;
+  const progressChanged = !(cardsTxt === remoteTxt || (!remoteTxt && localStates.size === 0)) || Object.keys(files).length > 0 || hiddenChanged || pinnedChanged;
   const suggestions = await pendingSuggestions();
-  const base = { pulledCards, pulledReviews: newLocal.length, hiddenPulled, suggestions: 0 };
+  const base = { pulledCards, pulledReviews: newLocal.length, hiddenPulled, pinnedPulled: pm.changed, suggestions: 0 };
   if (!progressChanged && !suggestions.length) {
     await kv.set('progressSyncedMonths', lastSynced);
     await kv.set('progressSyncedAt', now.toISOString());
@@ -162,6 +170,7 @@ export async function syncProgress({ deck, onStatus = () => {} } = {}) {
   if (progressChanged) {
     files[`${DIR}/cards.json`] = cardsTxt;
     if (hiddenTxt) files[`${DIR}/hidden.json`] = hiddenTxt;
+    if (pinnedTxt) files[`${DIR}/pinned.json`] = pinnedTxt;
     if (deck) {
       onStatus('Updating dashboards…');
       const allLogs = await logStore.all();

@@ -320,3 +320,16 @@ details.filters summary { cursor: pointer; color: var(--brand); font-weight: 600
 #suggest h2 svg { width: 22px; height: 22px; color: var(--accent); }
 #suggest textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); resize: vertical; min-height: 110px; }
 #suggest .check { display: flex; gap: 8px; align-items: flex-start; }
+
+/* Home: word buttons + quick practise (pinned / recent) */
+.row.two { align-items: stretch; }
+.row.two .btn { flex: 1; min-width: 0; }
+.word-btn { flex-direction: column; gap: 2px; text-align: center; line-height: 1.2; padding: 10px 8px; }
+.word-btn .small { font-weight: 500; }
+.icon-btn.pin { width: 40px; height: 40px; flex: none; color: var(--muted); }
+.icon-btn.pin svg { width: 20px; height: 20px; }
+.icon-btn.pin.on { color: var(--brand); }
+.icon-btn.pin.on svg { fill: currentColor; }
+.sheet-title .icon-btn.pin { margin-left: auto; }
+.inline-ico { width: 1em; height: 1em; vertical-align: -2px; }
+#quick .li .row b { min-width: 0; }
