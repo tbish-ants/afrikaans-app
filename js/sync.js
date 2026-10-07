@@ -4,6 +4,7 @@ import { kv, cards as cardStore, log as logStore } from './store.js';
 import { loadStates, buildCards } from './sched.js';
 import { computeStats } from './stats.js';
 import { dashboardFiles } from './obsidian.js';
+import { loadHidden, saveHidden, mergeHidden, hiddenFile, hiddenIds, pendingSuggestions, appendSuggestions, markSent, SUGGEST_PATH } from './extras.js';
 
 const DIR = '_app/progress';
 const sec = d => (d ? Math.round(new Date(d).getTime() / 1000) : 0);
@@ -60,7 +61,9 @@ async function commitFiles(files, message) {
     const head = ref.object.sha;
     const commit = await (await api(`/git/commits/${head}`)).json();
     const tree = [];
-    for (const [path, content] of Object.entries(files)) {
+    for (const [path, value] of Object.entries(files)) {
+      // a function is re-run on each attempt, so it builds on the latest copy in the vault
+      const content = typeof value === 'function' ? await value() : value;
       const b = await (await api('/git/blobs', { method: 'POST', body: { content, encoding: 'utf-8' } })).json();
       tree.push({ path, mode: '100644', type: 'blob', sha: b.sha });
     }
@@ -103,6 +106,13 @@ export async function syncProgress({ deck, onStatus = () => {} } = {}) {
     if (updates.length) { await cardStore.putMany(updates); pulledCards = updates.length; }
   }
 
+  // ---- hidden notes: newest change per note wins
+  const remoteHidden = await getText(`${DIR}/hidden.json`);
+  const { merged: hidden, changed: hiddenPulled } = mergeHidden(await loadHidden(), remoteHidden);
+  if (hiddenPulled) await saveHidden(hidden);
+  const hiddenTxt = Object.keys(hidden).length ? hiddenFile(hidden) : null;
+  const hiddenChanged = hiddenTxt !== null && hiddenTxt !== remoteHidden;
+
   // ---- review log: monthly files, union by (time, card)
   const remoteMonths = (await listDir(DIR)).filter(n => /^log-\d{4}-\d{2}\.jsonl$/.test(n)).map(n => n.slice(4, 11));
   const localByMonth = new Map();
@@ -140,21 +150,33 @@ export async function syncProgress({ deck, onStatus = () => {} } = {}) {
 
   // ---- write cards + dashboards (skip entirely if nothing changed)
   const cardsTxt = cardsFile(localStates);
-  if ((cardsTxt === remoteTxt || (!remoteTxt && localStates.size === 0)) && !Object.keys(files).length) {
+  const progressChanged = !(cardsTxt === remoteTxt || (!remoteTxt && localStates.size === 0)) || Object.keys(files).length > 0 || hiddenChanged;
+  const suggestions = await pendingSuggestions();
+  const base = { pulledCards, pulledReviews: newLocal.length, hiddenPulled, suggestions: 0 };
+  if (!progressChanged && !suggestions.length) {
     await kv.set('progressSyncedMonths', lastSynced);
     await kv.set('progressSyncedAt', now.toISOString());
-    return { restored: false, pulledCards, pulledReviews: newLocal.length, committed: false };
+    await kv.del('syncPending');
+    return { ...base, restored: false, committed: false };
   }
-  files[`${DIR}/cards.json`] = cardsTxt;
-  if (deck) {
-    onStatus('Updating dashboards…');
-    const allLogs = await logStore.all();
-    const stats = computeStats({ deck, cards: buildCards(deck), states: localStates, logs: allLogs, now });
-    Object.assign(files, dashboardFiles(stats, deck));
+  if (progressChanged) {
+    files[`${DIR}/cards.json`] = cardsTxt;
+    if (hiddenTxt) files[`${DIR}/hidden.json`] = hiddenTxt;
+    if (deck) {
+      onStatus('Updating dashboards…');
+      const allLogs = await logStore.all();
+      const stats = computeStats({ deck, cards: buildCards(deck), states: localStates, logs: allLogs, now });
+      Object.assign(files, dashboardFiles(stats, deck, hiddenIds(hidden)));
+    }
   }
+  if (suggestions.length) files[SUGGEST_PATH] = async () => appendSuggestions(await getText(SUGGEST_PATH), suggestions);
   onStatus('Saving to GitHub…');
-  const res = await commitFiles(files, `App progress ${now.toISOString().slice(0, 16).replace('T', ' ')}`);
+  const when = now.toISOString().slice(0, 16).replace('T', ' ');
+  const msg = progressChanged ? `App progress ${when}${suggestions.length ? ` + ${suggestions.length} suggestion${suggestions.length === 1 ? '' : 's'}` : ''}` : `App suggestion${suggestions.length === 1 ? '' : 's'} ${when}`;
+  const res = await commitFiles(files, msg);
+  if (suggestions.length) await markSent(suggestions.map(x => x.id));
   await kv.set('progressSyncedMonths', lastSynced);
   await kv.set('progressSyncedAt', now.toISOString());
-  return { restored: restoring && (pulledCards > 0 || newLocal.length > 0), pulledCards, pulledReviews: newLocal.length, committed: res.committed };
+  await kv.del('syncPending');
+  return { ...base, suggestions: suggestions.length, restored: restoring && (pulledCards > 0 || newLocal.length > 0), committed: res.committed };
 }

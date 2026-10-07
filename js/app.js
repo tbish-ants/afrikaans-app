@@ -6,6 +6,7 @@ import {
   markKnown, dayStart, TYPE_LABEL, Rating, configure,
 } from './sched.js';
 import { syncProgress } from './sync.js';
+import { loadHidden, saveHidden, hiddenIds, addSuggestion, pendingSuggestions, ctxLabel, SUGGEST_PATH } from './extras.js';
 import { computeStats } from './stats.js';
 import { heatmapSvg, forecastSvg, stagesSvg, lineSvg, APP_PALETTE } from './charts.js';
 
@@ -18,7 +19,10 @@ const DEFAULTS = {
 };
 
 const MAX_CARD_MS = 120000;   // time on one card counts up to 2 minutes (longer = you walked away)
-const S = { settings: { ...DEFAULTS }, deck: null, allCards: [], states: new Map(), session: null };
+const S = { settings: { ...DEFAULTS }, deck: null, allCards: [], states: new Map(), session: null, hidden: {}, current: null, view: 'home' };
+// hidden notes never come up in reviews or practice (they stay in the deck, Browse and the vault)
+const isHidden = iid => !!S.hidden[iid]?.on;
+const activeCards = () => S.allCards.filter(c => !isHidden(c.item));
 
 // ---------------------------------------------------------------- utils
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -111,13 +115,22 @@ const ICON = {
   book: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14z"/><path d="M6.5 17A2.5 2.5 0 0 0 4 19.5 2.5 2.5 0 0 0 6.5 22H20v-5"/></svg>',
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>',
   chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
+  bulb: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2V16h5v-.1c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z"/></svg>',
+  eyeOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.9 17.9A10 10 0 0 1 12 20c-7 0-10-8-10-8a18 18 0 0 1 4.1-5.9M9.9 4.2A9 9 0 0 1 12 4c7 0 10 8 10 8a18 18 0 0 1-2.2 3.2M14.1 14.1a3 3 0 1 1-4.2-4.2M2 2l20 20"/></svg>',
   sync: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-15.5 6.3L3 16M3 12a9 9 0 0 1 15.5-6.3L21 8"/><path d="M21 3v5h-5M3 21v-5h5"/></svg>',
 };
 
 let toastT;
-function toast(msg, ms = 2600) {
+function toast(msg, ms = 2600, action = null) {
   const t = document.getElementById('toast');
-  t.textContent = msg; t.classList.add('show');
+  t.textContent = msg;
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'toast-act'; b.textContent = action.label;
+    b.onclick = () => { t.classList.remove('show'); action.fn(); };
+    t.appendChild(b);
+  }
+  t.classList.add('show');
   clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), ms);
 }
 
@@ -160,6 +173,7 @@ async function loadAll() {
   S.deck = await kv.get('deck');
   if (S.deck) S.allCards = buildCards(S.deck);
   S.states = await loadStates();
+  S.hidden = await loadHidden();
 }
 
 async function syncDeck({ force = false, quiet = false } = {}) {
@@ -189,9 +203,11 @@ async function saveProgress({ quiet = false } = {}) {
   syncing = (async () => {
     try {
       const r = await syncProgress({ deck: S.deck });
-      S.states = await loadStates();
+      if (!S.session) S.states = await loadStates();
+      if (r.hiddenPulled) S.hidden = await loadHidden();
       if (r.restored) toast(`Restored your progress from the vault (${r.pulledCards} cards)`, 4000);
       else if (!quiet && r.committed) toast('Progress saved to your vault');
+      else if (r.suggestions) toast(`Suggestion${r.suggestions === 1 ? '' : 's'} sent to Obsidian ✓`);
       return true;
     } catch (e) {
       if (!quiet || /Read and write/.test(e.message)) toast(e.message, 5000);
@@ -202,7 +218,7 @@ async function saveProgress({ quiet = false } = {}) {
 }
 async function progressDirty() {
   const at = await kv.get('progressSyncedAt');
-  if (!at) return true;
+  if (!at || (await kv.get('syncPending'))) return true;
   return (await logStore.since(at)).length > 0;
 }
 
@@ -244,6 +260,37 @@ function stageLabel(iid) {
   return best >= 21 ? 'mature' : 'learning';
 }
 
+const hiddenChip = ref => (isHidden(ref) ? '<span class="chip chip-hidden">hidden</span>' : '');
+const hideButton = ref => isHidden(ref)
+  ? `<button class="btn block" data-hide="${esc(ref)}" data-on="0">Unhide — bring back into reviews</button>`
+  : `<button class="btn ghost block subtle" data-hide="${esc(ref)}" data-on="1">${ICON.eyeOff} Hide from reviews</button>`;
+
+// ---------------------------------------------------------------- hiding notes
+async function setHidden(iid, on) {
+  S.hidden = { ...S.hidden, [iid]: { ts: Date.now(), on } };
+  await saveHidden(S.hidden);
+  await kv.set('syncPending', true);
+  if (on && S.session) {   // drop it from the session in progress
+    S.session.queue = S.session.queue.filter(c => c.item !== iid);
+    S.session.learning = S.session.learning.filter(x => x.card.item !== iid);
+  }
+  if (!S.session) saveProgress({ quiet: true });   // otherwise saved when the session ends
+}
+// keep the page under the sheet in step (Browse tags, Home's hidden count, the Hidden list)
+function refreshUnderSheet(ref) {
+  if (S.view === 'hidden') return hiddenView();
+  if (S.view === 'home') return home();
+  $app.querySelectorAll(`.browse-list [data-sheet="${CSS.escape(ref)}"] .tag`).forEach(t => {
+    if (isHidden(ref)) { t.className = 'tag tag-hidden'; t.textContent = 'hidden'; }
+    else { const ns = noteStatus(ref); t.className = `tag st-${ns.key}`; t.textContent = ns.label; }
+  });
+}
+function hideWithUndo(iid) {
+  const it = S.deck.items[iid];
+  setHidden(iid, true);
+  toast(`Hidden “${it ? it.af : iid}” — it won't come up again`, 5000, { label: 'Undo', fn: async () => { await setHidden(iid, false); toast('Unhidden'); if (!S.session) refreshUnderSheet(iid); } });
+}
+
 function sheetBody(ref) {
   const [kind, ...rest] = ref.split(':'); const key = rest.join(':');
   const practise = (label, filterArgs) => S.session ? '' :
@@ -259,7 +306,7 @@ function sheetBody(ref) {
       return `
         <div class="sheet-title"><h2 lang="af">${esc(it.af)}</h2>${audioBtn(it.audio)}</div>
         <p class="en big-en">${esc(it.en.join(' / '))}</p>
-        <div class="facts left">${[it.pos, it.level, it.register].filter(Boolean).map(x => `<span class="chip">${esc(x)}</span>`).join('')}<span class="chip">${stageLabel(ref)}</span></div>
+        <div class="facts left">${[it.pos, it.level, it.register].filter(Boolean).map(x => `<span class="chip">${esc(x)}</span>`).join('')}<span class="chip">${stageLabel(ref)}</span>${hiddenChip(ref)}</div>
         ${forms ? `<div class="kvs">${forms}</div>` : ''}
         ${it.construction ? `<p class="small"><b>Pattern:</b> ${esc(it.construction)}</p>` : ''}
         ${it.note ? `<div class="md">${md(it.note)}</div>` : ''}
@@ -268,18 +315,20 @@ function sheetBody(ref) {
         ${it.antonyms?.length ? `<h3>Opposites</h3><div class="facts left">${refChips(it.antonyms)}</div>` : ''}
         ${it.confusable?.length ? `<h3>Don't confuse with</h3><div class="facts left">${refChips(it.confusable)}</div>` : ''}
         <h3>Examples (${ex.length})</h3>${phraseRows(ex)}
-        ${it.lessons?.length ? `<h3>Lessons</h3><div class="facts left">${it.lessons.map(l => chipLink('l:' + l, esc(l))).join('')}</div>` : ''}`;
+        ${it.lessons?.length ? `<h3>Lessons</h3><div class="facts left">${it.lessons.map(l => chipLink('l:' + l, esc(l))).join('')}</div>` : ''}
+        ${hideButton(ref)}`;
     }
     return `
       <div class="sheet-title"><h2 lang="af" class="sentence">${esc(it.af)}</h2>${audioBtn(it.audio)}</div>
       <p class="en big-en">${esc(it.en.join(' / '))}</p>
-      <div class="facts left">${[it.kind, it.level, it.register].filter(Boolean).map(x => `<span class="chip">${esc(x)}</span>`).join('')}${it.fav ? '<span class="chip">★ favourite</span>' : ''}<span class="chip">${stageLabel(ref)}</span></div>
+      <div class="facts left">${[it.kind, it.level, it.register].filter(Boolean).map(x => `<span class="chip">${esc(x)}</span>`).join('')}${it.fav ? '<span class="chip">★ favourite</span>' : ''}<span class="chip">${stageLabel(ref)}</span>${hiddenChip(ref)}</div>
       ${it.corrected_from ? `<p class="small muted">You first wrote: <i lang="af">${esc(it.corrected_from)}</i></p>` : ''}
       ${it.grammar?.length ? `<h3>Grammar</h3><div class="facts left">${it.grammar.map(g => chipLink('g:' + g, esc(g))).join('')}</div>` : ''}
       ${it.words?.length ? `<h3>Words</h3>${wordListHtml(it)}` : ''}
       ${it.note ? `<div class="md">${md(it.note)}</div>` : ''}
       ${(it.extra || []).map(([t, b]) => `${t ? `<h3>${esc(t)}</h3>` : ''}<div class="md">${md(b)}</div>`).join('')}
-      ${it.lessons?.length ? `<h3>Lesson</h3><div class="facts left">${it.lessons.map(l => chipLink('l:' + l, esc(l))).join('')}</div>` : ''}`;
+      ${it.lessons?.length ? `<h3>Lesson</h3><div class="facts left">${it.lessons.map(l => chipLink('l:' + l, esc(l))).join('')}</div>` : ''}
+      ${hideButton(ref)}`;
   }
   if (kind === 'g') {
     const g = S.deck.grammar.find(x => x.id === key);
@@ -344,6 +393,7 @@ $sheet.id = 'sheet'; $sheet.setAttribute('aria-hidden', 'true');
 $sheet.innerHTML = `<div class="sheet-backdrop"></div><section class="sheet-panel" role="dialog" aria-modal="true">
   <div class="sheet-head"><span class="grabber"></span>
     <button class="icon-btn" id="sheet-back" aria-label="Back">${ICON.back}</button><span class="spacer"></span>
+    <button class="icon-btn suggest-btn" data-suggest aria-label="Suggest an improvement">${ICON.bulb}</button>
     <button class="icon-btn" id="sheet-close" aria-label="Close">${ICON.close}</button></div>
   <div class="sheet-body"></div></section>`;
 document.body.appendChild($sheet);
@@ -364,6 +414,14 @@ function drawSheet() {
   body.querySelectorAll('[data-practise]').forEach(b => b.onclick = () => {
     const f = JSON.parse(b.dataset.practise);
     closeSheets(() => startSession({ mode: f.mode || 'cram', size: 25, filter: makeFilter(f), title: f.lesson ? `Lesson ${f.lesson}` : f.grammar }));
+  });
+  body.querySelectorAll('[data-hide]').forEach(b => b.onclick = async () => {
+    const top = body.scrollTop;
+    const ref = b.dataset.hide;
+    if (b.dataset.on === '1') hideWithUndo(ref);
+    else { await setHidden(ref, false); toast('Back in your reviews'); }
+    drawSheet(); body.scrollTop = top;
+    refreshUnderSheet(ref);
   });
   body.querySelectorAll('[data-expand]').forEach(b => b.onclick = () => {
     const top = body.scrollTop; sheetExpanded.add(b.dataset.expand); drawSheet(); body.scrollTop = top;
@@ -396,12 +454,13 @@ $sheet.querySelector('#sheet-back').onclick = () => history.back();
 })();
 
 // ---------------------------------------------------------------- router
-const routes = { home, study, practice, settings: settingsView, setup, progress: progressView, browse: browseView };
+const routes = { home, study, practice, settings: settingsView, setup, progress: progressView, browse: browseView, hidden: hiddenView };
 function go(view, params = {}) {
   history.pushState({ view, params }, '', '#' + view);
   render(view, params);
 }
 window.addEventListener('popstate', e => {
+  if ($dlg.open) { $dlg.close(); return; }   // back closes the suggestion box
   const st = e.state || { view: 'home', params: {} };
   // sheets: going back pops one sheet; never re-render the page underneath
   const depth = st.sheet || 0;
@@ -416,6 +475,8 @@ window.addEventListener('popstate', e => {
 });
 function render(view, params = {}) {
   if (!S.deck && view !== 'settings') view = 'setup';
+  S.view = routes[view] ? view : 'home';
+  if (S.view !== 'study') S.current = null;
   (routes[view] || home)(params);
   window.scrollTo(0, 0);
 }
@@ -435,7 +496,8 @@ async function setup() {
 
 async function home() {
   const now = new Date();
-  const c = counts({ allCards: S.allCards, states: S.states, deck: S.deck, settings: S.settings, now });
+  const c = counts({ allCards: activeCards(), states: S.states, deck: S.deck, settings: S.settings, now });
+  const nHidden = hiddenIds(S.hidden).filter(id => S.deck.items[id]).length;
   const logs = await logStore.since(new Date(dayStart(now) - 13 * 864e5).toISOString());
   const perDay = new Array(14).fill(0), msDay = new Array(14).fill(0);
   const ds = dayStart(now).getTime();
@@ -484,6 +546,7 @@ async function home() {
         ${lineSvg(minPts, APP_PALETTE, { fmt: fmtMin, label: 'Minutes studied' })}
         <p class="tip small">Tap a day for details</p>
       </div>
+      ${nHidden ? `<button class="btn ghost block subtle" id="hidden-link">${ICON.eyeOff} ${nHidden} hidden note${nHidden === 1 ? '' : 's'}</button>` : ''}
       <p class="muted small center">Deck built ${esc((S.deck.built || '').slice(0, 16).replace('T', ' '))}${synced ? ` · checked ${esc(new Date(synced).toLocaleString())}` : ''}</p>
     </div>`;
   wireTips($app);
@@ -493,6 +556,7 @@ async function home() {
   document.getElementById('progress').onclick = () => go('progress');
   document.getElementById('browse').onclick = () => go('browse');
   document.getElementById('browse2').onclick = () => go('browse');
+  const hl = document.getElementById('hidden-link'); if (hl) hl.onclick = () => go('hidden');
   document.getElementById('sync').onclick = async () => { await syncDeck({ force: false }); await saveProgress(); home(); };
   const l = document.getElementById('latest');
   if (l) l.onclick = () => startSession({ mode: 'cram', size: 25, filter: makeFilter({ lesson: latest.id }), title: `Lesson ${latest.date}` });
@@ -574,8 +638,8 @@ async function practice() {
   const upd = () => {
     const f = read();
     const filt = makeFilter(f);
-    const c = counts({ allCards: S.allCards, states: S.states, deck: S.deck, settings: S.settings, filter: filt });
-    const total = S.allCards.filter(x => filt(x, S.deck.items[x.item])).length;
+    const c = counts({ allCards: activeCards(), states: S.states, deck: S.deck, settings: S.settings, filter: filt });
+    const total = activeCards().filter(x => filt(x, S.deck.items[x.item])).length;
     document.getElementById('count').textContent = `${total} cards match · ${c.due} due · ${total - c.learned} never studied`
       + (f.mode === 'new' ? ` · ${c.newAvail} ready to learn now` : '');
   };
@@ -592,7 +656,7 @@ async function practice() {
   kb.onclick = async () => {
     if (kb.dataset.confirm !== '1') { kb.dataset.confirm = '1'; kb.textContent = 'Tap again to confirm'; kb.classList.add('danger'); return; }
     const filt = makeFilter(read());
-    const list = S.allCards.filter(c => filt(c, S.deck.items[c.item]) && !S.states.has(c.id));
+    const list = activeCards().filter(c => filt(c, S.deck.items[c.item]) && !S.states.has(c.id));
     const n = await markKnown(list, S.states);
     toast(`Marked ${n} cards as known`);
     kb.dataset.confirm = ''; kb.textContent = 'Mark new cards as known'; kb.classList.remove('danger');
@@ -602,7 +666,7 @@ async function practice() {
 
 // ---------------------------------------------------------------- study session
 function startSession({ mode, size = 0, filter = null, title = 'Review' }) {
-  const queue = buildQueue({ allCards: S.allCards, states: S.states, deck: S.deck, settings: S.settings, filter, mode, size });
+  const queue = buildQueue({ allCards: activeCards(), states: S.states, deck: S.deck, settings: S.settings, filter, mode, size });
   if (!queue.length) { toast(mode === 'new' ? 'No new cards left in this selection' : 'Nothing to study with those settings'); return; }
   S.session = new Session(queue, S.states, mode);
   S.session.title = title;
@@ -623,6 +687,7 @@ async function study() {
   const st = S.states.get(card.id);
   const isNew = !st;
   const t0 = Date.now();
+  S.current = { card, it };
 
   let typing = card.type === 'cz' || (card.type === 'ra' && S.settings.typeProduction) || (card.type === 'ar' && S.settings.typeRecognition);
   let cz = null;
@@ -736,8 +801,12 @@ function showAnswer(card, it, st, result, typedText, t0) {
       ${facts.length ? `<div class="facts">${facts.map(f => f.startsWith('<button') ? f : `<span class="chip">${f}</span>`).join('')}</div>` : ''}
       ${words}
       ${it.note ? `<div class="note md">${md(it.note)}</div>` : ''}
-      <button class="btn ghost small-btn" data-sheet="${esc(card.item)}">Open full note ›</button>
+      <div class="answer-links">
+        <button class="btn ghost small-btn" data-sheet="${esc(card.item)}">Open full note ›</button>
+        <button class="btn ghost small-btn subtle" id="hide-card" aria-label="Hide this note from reviews">${ICON.eyeOff} Hide</button>
+      </div>
     </div>`;
+  document.getElementById('hide-card').onclick = () => { hideWithUndo(card.item); study(); };
   wireAudio(document.getElementById('answer'));
   if (card.type !== 'ar' && S.settings.autoplay && it.audio) play(it.audio, document.querySelector('#answer [data-audio]'));
 
@@ -1000,7 +1069,7 @@ async function browseView() {
     return `<button class="li" data-sheet="${esc(r.ref)}"><div class="grow">
       <div><b lang="af">${esc(it.af)}</b> <span class="muted small">${esc(meta)}</span></div>
       <div class="muted small ellipsis">${esc((it.en || []).join(' / '))}</div></div>
-      <span class="tag st-${ns.key}">${ns.label}</span></button>`;
+      ${isHidden(r.ref) ? '<span class="tag tag-hidden">hidden</span>' : `<span class="tag st-${ns.key}">${ns.label}</span>`}</button>`;
   };
   const update = (resetShown = true) => {
     const f = read();
@@ -1053,6 +1122,89 @@ async function browseView() {
   document.getElementById('back').onclick = () => history.back();
   update();
 }
+
+// ---------------------------------------------------------------- hidden notes
+function hiddenView() {
+  const ids = hiddenIds(S.hidden).filter(id => S.deck.items[id])
+    .sort((a, b) => S.hidden[b].ts - S.hidden[a].ts);
+  $app.innerHTML = `
+    <div class="bar">
+      <button class="icon-btn" id="back" aria-label="Back">${ICON.back}</button>
+      <h1>Hidden notes</h1>
+    </div>
+    <p class="muted small">These never come up in reviews or practice. They stay in your vault and in Browse, and keep their progress — unhide one and it carries on where it left off.</p>
+    ${ids.length ? `<div class="list browse-list">${ids.map(id => {
+      const it = S.deck.items[id];
+      return `<div class="li-wrap" data-row="${esc(id)}"><button class="li" data-sheet="${esc(id)}"><div class="grow">
+        <div><b lang="af">${esc(it.af)}</b> <span class="muted small">${it.t === 'v' ? 'word' : 'sentence'}</span></div>
+        <div class="muted small ellipsis">${esc(it.en.join(' / '))} · hidden ${esc(new Date(S.hidden[id].ts).toLocaleDateString())}</div></div></button>
+        <button class="btn small-btn unhide" data-unhide="${esc(id)}">Unhide</button></div>`;
+    }).join('')}</div>` : '<div class="panel"><p class="muted">Nothing hidden. To hide a note, tap <b>Hide</b> under an answer, or open the note and tap <b>Hide from reviews</b>.</p></div>'}`;
+  document.getElementById('back').onclick = () => history.back();
+  $app.querySelectorAll('[data-unhide]').forEach(b => b.onclick = async () => {
+    await setHidden(b.dataset.unhide, false);
+    toast(`“${S.deck.items[b.dataset.unhide].af}” is back in your reviews`);
+    hiddenView();
+  });
+}
+
+// ---------------------------------------------------------------- suggestions (💡 on every screen)
+const VIEW_LABEL = { home: 'Home', study: 'Review', practice: 'Practise', progress: 'Progress', browse: 'Browse', settings: 'Settings', hidden: 'Hidden notes', setup: 'Setup' };
+function suggestContext() {
+  const ctx = { screen: VIEW_LABEL[S.view] || S.view };
+  const ref = sheetStack[sheetStack.length - 1];
+  if (ref) {
+    const [k, ...rest] = ref.split(':'); const key = rest.join(':');
+    const it = S.deck?.items[ref];
+    if (it) { ctx.note = it.name; ctx.noteLabel = it.af; }
+    else if (k === 'g' || k === 'l') ctx.note = key;
+    ctx.screen += ` (${{ v: 'word', p: 'sentence', g: 'grammar', l: 'lesson' }[k] || 'note'} sheet)`;
+  } else if (S.view === 'study' && S.current) {
+    ctx.note = S.current.it.name; ctx.noteLabel = S.current.it.af;
+    ctx.card = TYPE_LABEL[S.current.card.type];
+  }
+  return ctx;
+}
+const $dlg = document.createElement('dialog');
+$dlg.id = 'suggest';
+$dlg.innerHTML = `<form method="dialog" class="stack">
+  <div class="row"><h2>${ICON.bulb} Suggest an improvement</h2></div>
+  <textarea id="sg-text" rows="5" placeholder="What would make the app better?"></textarea>
+  <label class="check small"><input type="checkbox" id="sg-ctx" checked> <span>Attach where I am: <b id="sg-where"></b></span></label>
+  <p class="muted small" id="sg-note"></p>
+  <div class="row"><button type="button" class="btn ghost" id="sg-cancel">Cancel</button><button type="button" class="btn primary" id="sg-send" style="flex:1">Save suggestion</button></div>
+</form>`;
+document.body.appendChild($dlg);
+let sgCtx = null;
+async function openSuggest() {
+  if ($dlg.open) return;
+  sgCtx = suggestContext();
+  $dlg.querySelector('#sg-where').textContent = ctxLabel(sgCtx);
+  const waiting = (await pendingSuggestions()).length;
+  $dlg.querySelector('#sg-note').textContent = `Goes to ${SUGGEST_PATH} in your vault next time the app saves progress.${waiting ? ` ${waiting} waiting to send.` : ''}`;
+  $dlg.querySelector('#sg-text').value = '';
+  history.pushState({ ...(history.state || {}), dlg: 1 }, '');
+  $dlg.showModal();
+  setTimeout(() => $dlg.querySelector('#sg-text').focus(), 50);
+}
+const closeSuggest = () => { if ($dlg.open) history.back(); };
+$dlg.addEventListener('cancel', e => { e.preventDefault(); closeSuggest(); });
+$dlg.querySelector('#sg-cancel').onclick = closeSuggest;
+$dlg.querySelector('#sg-send').onclick = async () => {
+  const text = $dlg.querySelector('#sg-text').value.trim();
+  if (!text) { $dlg.querySelector('#sg-text').focus(); return; }
+  await addSuggestion(text, $dlg.querySelector('#sg-ctx').checked ? sgCtx : { screen: sgCtx.screen });
+  await kv.set('syncPending', true);
+  closeSuggest();
+  toast(S.session || !navigator.onLine ? 'Suggestion saved — it goes to Obsidian with your next sync' : 'Suggestion saved — sending to Obsidian…');
+  if (!S.session) saveProgress({ quiet: true });
+};
+document.addEventListener('click', e => { if (e.target.closest('[data-suggest]')) { e.preventDefault(); openSuggest(); } });
+// put a 💡 in the top bar of every screen
+new MutationObserver(() => {
+  const bar = $app.querySelector('.bar');
+  if (bar && !bar.querySelector('[data-suggest]')) bar.insertAdjacentHTML('beforeend', `<button class="icon-btn suggest-btn" data-suggest aria-label="Suggest an improvement">${ICON.bulb}</button>`);
+}).observe($app, { childList: true });
 
 // ---------------------------------------------------------------- settings
 async function settingsView() {
@@ -1108,6 +1260,11 @@ async function settingsView() {
         <div class="row"><button type="button" class="btn" id="export" style="flex:1">Export</button>
         <label class="btn" style="flex:1">Import<input type="file" id="import" accept="application/json" hidden></label></div>
       </div>
+      <div class="panel stack">
+        <h2>Hidden notes</h2>
+        <p class="small muted">${hiddenIds(S.hidden).length} note${hiddenIds(S.hidden).length === 1 ? '' : 's'} hidden from reviews.</p>
+        <button type="button" class="btn block" id="to-hidden">See hidden notes</button>
+      </div>
       <p class="small muted center">Deck: ${S.deck ? `${Object.keys(S.deck.items).length} notes, built ${esc(S.deck.built)}` : 'not downloaded'}</p>
     </form>`;
   const form = document.getElementById('sf');
@@ -1128,6 +1285,7 @@ async function settingsView() {
     const ok = await syncDeck({ force: true });
     if (ok) { await saveProgress({ quiet: true }); go('home'); }
   };
+  document.getElementById('to-hidden').onclick = () => (S.deck ? go('hidden') : null);
   document.getElementById('dl-audio').onclick = async e => {
     const btn = e.currentTarget; btn.disabled = true;
     const stat = document.getElementById('audio-stat');
@@ -1149,7 +1307,7 @@ async function settingsView() {
   };
   document.getElementById('export').onclick = async () => {
     const data = { app: 'afrikaans', version: 1, exported: new Date().toISOString(),
-      cards: await cardStore.all(), log: await logStore.all(), settings: { ...S.settings, token: '' } };
+      cards: await cardStore.all(), log: await logStore.all(), hidden: S.hidden, settings: { ...S.settings, token: '' } };
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(data)], { type: 'application/json' }));
     a.download = `afrikaans-progress-${new Date().toISOString().slice(0, 10)}.json`;
@@ -1162,6 +1320,7 @@ async function settingsView() {
       if (data.app !== 'afrikaans') throw new Error('Not an Afrikaans backup file');
       await cardStore.clear(); await cardStore.putMany(data.cards || []);
       await logStore.clear(); await logStore.addMany((data.log || []));
+      if (data.hidden) { S.hidden = data.hidden; await saveHidden(S.hidden); }
       S.states = await loadStates();
       toast(`Restored ${data.cards.length} cards`);
     } catch (err) { toast(err.message, 4000); }
@@ -1170,9 +1329,10 @@ async function settingsView() {
 
 // ---------------------------------------------------------------- boot
 document.addEventListener('keydown', e => {
+  if ($dlg.open) return;
   if (sheetStack.length) { if (e.key === 'Escape') closeSheets(); return; }
   if (!S.session) return;
-  if (e.target.tagName === 'INPUT') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
   if (['1', '2', '3', '4'].includes(e.key)) document.querySelector(`.rate[data-r="${e.key}"]`)?.click();
   if (e.key === ' ' || e.key === 'Enter') { const b = document.getElementById('show'); if (b) { e.preventDefault(); b.click(); } }
 });

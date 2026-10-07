@@ -297,3 +297,26 @@ details.filters summary { cursor: pointer; color: var(--brand); font-weight: 600
 .tag.st-3 { border-color: var(--stage-mature); color: var(--text); }
 #more { margin-top: 8px; }
 .btn svg { width: 20px; height: 20px; flex: none; }
+
+/* ---- hiding notes */
+.answer-links { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.btn.subtle { color: var(--muted); font-weight: 500; }
+.btn.subtle svg { width: 16px; height: 16px; opacity: .8; }
+.small-btn.subtle { margin-left: auto; }
+.btn.block.subtle { justify-content: center; gap: 6px; margin-top: 14px; }
+.chip-hidden, .tag-hidden { border-style: dashed; }
+.chip-hidden { background: none; border: 1px dashed var(--muted); }
+.li-wrap .unhide { margin: 0 0 0 8px; flex: none; }
+.li-wrap .li { flex: 1; min-width: 0; width: auto; }
+#toast { display: flex; align-items: center; gap: 14px; }
+.toast-act { appearance: none; border: 0; background: none; color: var(--bg); font: inherit; font-weight: 700; text-decoration: underline; padding: 4px; cursor: pointer; }
+
+/* ---- suggestions */
+.suggest-btn svg { width: 22px; height: 22px; }
+.bar .suggest-btn { color: var(--muted); }
+#suggest { border: 0; border-radius: var(--radius); padding: 16px; width: min(520px, calc(100% - 32px)); background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+#suggest::backdrop { background: rgba(0,0,0,.4); }
+#suggest h2 { display: flex; align-items: center; gap: 8px; font-size: 1.05rem; }
+#suggest h2 svg { width: 22px; height: 22px; color: var(--accent); }
+#suggest textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); resize: vertical; min-height: 110px; }
+#suggest .check { display: flex; gap: 8px; align-items: flex-start; }

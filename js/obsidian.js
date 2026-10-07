@@ -7,7 +7,7 @@ const bar = (p, n = 10) => '▰'.repeat(Math.round((p / 100) * n)) + '▱'.repea
 const cellSafe = s => String(s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
 const NOTICE = '> [!info] Written by the Afrikaans app after each study session. Don\'t edit — it gets overwritten.';
 
-export function dashboardFiles(stats, deck) {
+export function dashboardFiles(stats, deck, hidden = []) {
   const s = stats;
   const updated = s.built.slice(0, 16).replace('T', ' ');
   const files = {};
@@ -31,7 +31,7 @@ ${NOTICE}
 
 # Afrikaans progress
 
-*Updated ${updated}* · [[Progress/Lessons|By lesson]] · [[Progress/Trickiest words|Trickiest words]]
+*Updated ${updated}* · [[Progress/Lessons|By lesson]] · [[Progress/Trickiest words|Trickiest words]] · [[Progress/Hidden notes|Hidden notes]] (${hidden.length})
 
 | | |
 |---|---|
@@ -117,6 +117,23 @@ Ranked by how often you've forgotten them (lapses) and missed them in the last 3
 ${s.trickiest.length ? `| Note | Meaning | Lapses | Misses (30 d) |
 |---|---|---:|---:|
 ${s.trickiest.map(t => { const it = deck.items[t.item]; return `| [[${it.name}]] | ${cellSafe(it.en.join(' / '))} | ${t.lapses} | ${t.again30} |`; }).join('\n')}` : '*Nothing tricky yet — keep reviewing and this list will fill up.*'}
+`;
+  const hid = hidden.map(id => deck.items[id]).filter(Boolean).sort((a, b) => a.af.localeCompare(b.af, 'af'));
+  files['Progress/Hidden notes.md'] = `---
+updated: ${s.built}
+hidden: ${hid.length}
+---
+${NOTICE}
+
+# Hidden notes
+
+*Updated ${updated}* · [[Progress/Dashboard|Dashboard]]
+
+Notes you've hidden in the app, so they never come up in reviews or practice. They stay in the vault, and their progress is kept. To bring one back: in the app, **Home → Hidden notes → Unhide**.
+
+${hid.length ? `| Note | Type | Meaning |
+|---|---|---|
+${hid.map(it => `| [[${it.name}]] | ${it.t === 'v' ? 'word' : 'sentence'} | ${cellSafe(it.en.join(' / '))} |`).join('\n')}` : '*Nothing hidden.*'}
 `;
   return files;
 }
